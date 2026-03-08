@@ -5,6 +5,8 @@ import { agentsRouter } from "./routes/agents.js";
 import { eventsRouter } from "./routes/events.js";
 import { configRouter } from "./routes/config.js";
 import { modelsRouter } from "./routes/models.js";
+import { projectsRouter } from "./routes/projects.js";
+import { jobsRouter } from "./routes/jobs.js";
 import { ApiError } from "./lib/errors.js";
 import { DEFAULT_API_PORT } from "@agentforge/shared";
 
@@ -21,13 +23,13 @@ app.route("/api/v1/agents", agentsRouter);
 app.route("/api/v1/events", eventsRouter);
 app.route("/api/v1/config", configRouter);
 app.route("/api/v1/models", modelsRouter);
+app.route("/api/v1/projects", projectsRouter);
+app.route("/api/v1/jobs", jobsRouter);
 
 // TODO: Mount remaining routes as they are implemented
 // app.route("/api/v1/skills", skillsRouter);
 // app.route("/api/v1/mcps", mcpsRouter);
 // app.route("/api/v1/playbooks", playbooksRouter);
-// app.route("/api/v1/projects", projectsRouter);
-// app.route("/api/v1/jobs", jobsRouter);
 
 // ─── Health check ────────────────────────────────────────────────────
 

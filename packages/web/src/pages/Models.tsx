@@ -108,9 +108,8 @@ export default function Models() {
   const configuredIds = () => new Set(configuredModels()?.map((m) => m.modelId) ?? []);
 
   return (
-    <div class="min-h-screen bg-gray-950 text-gray-100 p-8">
+    <div class="p-8">
       <div class="max-w-4xl mx-auto">
-        <a href="/" class="text-gray-500 hover:text-gray-300 text-sm mb-6 inline-block">← Dashboard</a>
         <h1 class="text-2xl font-bold mb-1">Models</h1>
         <p class="text-gray-400 text-sm mb-8">Configure usable models for your OpenCode agents</p>
 

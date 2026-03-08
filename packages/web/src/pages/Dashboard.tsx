@@ -9,7 +9,7 @@ export default function Dashboard() {
   const [health] = createResource(fetchHealth);
 
   return (
-    <div class="min-h-screen bg-gray-950 text-gray-100 p-8">
+    <div class="p-8">
       <h1 class="text-3xl font-bold mb-2">AgentForge</h1>
       <p class="text-gray-400 mb-8">Agent Orchestration Dashboard</p>
 

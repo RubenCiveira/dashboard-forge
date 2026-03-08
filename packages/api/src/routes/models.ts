@@ -50,7 +50,7 @@ modelsRouter.patch(
     const { enabled } = ctx.req.valid("json");
 
     const existing = await db.select().from(models).where(eq(models.id, id)).get();
-    if (!existing) throw new NotFoundError("Model not found");
+    if (!existing) throw new NotFoundError("Model", id);
 
     await db
       .update(models)

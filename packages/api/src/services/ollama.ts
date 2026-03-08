@@ -12,11 +12,11 @@ function getBaseUrl(): string {
  */
 export async function listOllamaModels(): Promise<OllamaModel[]> {
   const res = await fetch(`${getBaseUrl()}/api/tags`).catch(() => {
-    throw new ApiError(502, "OLLAMA_UNREACHABLE", "Cannot reach Ollama at " + getBaseUrl());
+    throw new ApiError("OLLAMA_UNREACHABLE", "Cannot reach Ollama at " + getBaseUrl(), 502);
   });
 
   if (!res.ok) {
-    throw new ApiError(502, "OLLAMA_ERROR", `Ollama returned ${res.status}`);
+    throw new ApiError("OLLAMA_ERROR", `Ollama returned ${res.status}`, 502);
   }
 
   const body = await res.json() as { models?: unknown[] };
@@ -34,11 +34,11 @@ export async function* pullOllamaModel(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, stream: true }),
   }).catch(() => {
-    throw new ApiError(502, "OLLAMA_UNREACHABLE", "Cannot reach Ollama at " + getBaseUrl());
+    throw new ApiError("OLLAMA_UNREACHABLE", "Cannot reach Ollama at " + getBaseUrl(), 502);
   });
 
   if (!res.ok || !res.body) {
-    throw new ApiError(502, "OLLAMA_ERROR", `Ollama returned ${res.status}`);
+    throw new ApiError("OLLAMA_ERROR", `Ollama returned ${res.status}`, 502);
   }
 
   const reader = res.body.getReader();
