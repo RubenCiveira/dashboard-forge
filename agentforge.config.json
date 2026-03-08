@@ -1,0 +1,6 @@
+{
+  "ollama": {
+    "enabled": true,
+    "baseUrl": "http://localhost:11434"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install)",
+      "Bash(bun run db:generate)",
+      "Bash(bun run db:migrate)",
+      "Bash(curl -s http://localhost:4080/api/v1/config)"
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "agentforge",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "bun run --filter './packages/api' dev & bun run --filter './packages/web' dev",
+    "dev:api": "bun run --filter './packages/api' dev",
+    "dev:web": "bun run --filter './packages/web' dev",
+    "build": "bun run --filter './packages/*' build",
+    "db:generate": "bun run --filter './packages/api' db:generate",
+    "db:migrate": "bun run --filter './packages/api' db:migrate",
+    "db:studio": "bun run --filter './packages/api' db:studio",
+    "test": "bun run --filter './packages/*' test",
+    "lint": "eslint packages/*/src/**/*.{ts,tsx}",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0"
+  }
+}

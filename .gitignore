@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+packages/cli/bin/
+
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Drizzle generated migrations (optional: remove if you want to commit them)
+# packages/api/drizzle/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temp / runtime
+tmp/
+.tmp/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+packages/web/.vite/
+
+# Bun
+bun.lockb
