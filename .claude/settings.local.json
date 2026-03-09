@@ -5,7 +5,17 @@
       "Bash(bun run db:generate)",
       "Bash(bun run db:migrate)",
       "Bash(curl -s http://localhost:4080/api/v1/config)",
-      "Bash(curl -s http://localhost:4080/api/v1/projects)"
+      "Bash(curl -s http://localhost:4080/api/v1/projects)",
+      "Bash(lsof -ti:4080,3000)",
+      "Bash(lsof -i:4080 -i:3000)",
+      "Read(//Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/**)",
+      "Bash(~/.bun/bin/bun src/index.ts)",
+      "Bash(opencode --version)",
+      "Bash(opencode models)",
+      "Bash(bun run typecheck)",
+      "Bash(/Users/ruben.civeiraiglesia/.bun/bin/bun run typecheck)",
+      "Bash(/Users/ruben.civeiraiglesia/.bun/bin/bun x tsc --noEmit)",
+      "Bash(/Users/ruben.civeiraiglesia/.bun/bin/bun x tsc --noEmit --noResolve)"
     ]
   }
 }

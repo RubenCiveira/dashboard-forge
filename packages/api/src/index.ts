@@ -7,8 +7,17 @@ import { configRouter } from "./routes/config.js";
 import { modelsRouter } from "./routes/models.js";
 import { projectsRouter } from "./routes/projects.js";
 import { jobsRouter } from "./routes/jobs.js";
+import { skillsRouter } from "./routes/skills.js";
+import { playbooksRouter } from "./routes/playbooks.js";
+import { runnersRouter } from "./routes/runners.js";
 import { ApiError } from "./lib/errors.js";
 import { DEFAULT_API_PORT } from "@agentforge/shared";
+import { startupSync } from "./services/markdown-sync.js";
+import { db, sqlite } from "./db/index.js";
+import { runners } from "./db/schema.js";
+import { randomUUID } from "crypto";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
+import { resolve } from "path";
 
 const app = new Hono();
 
@@ -25,11 +34,9 @@ app.route("/api/v1/config", configRouter);
 app.route("/api/v1/models", modelsRouter);
 app.route("/api/v1/projects", projectsRouter);
 app.route("/api/v1/jobs", jobsRouter);
-
-// TODO: Mount remaining routes as they are implemented
-// app.route("/api/v1/skills", skillsRouter);
-// app.route("/api/v1/mcps", mcpsRouter);
-// app.route("/api/v1/playbooks", playbooksRouter);
+app.route("/api/v1/skills", skillsRouter);
+app.route("/api/v1/playbooks", playbooksRouter);
+app.route("/api/v1/runners", runnersRouter);
 
 // ─── Health check ────────────────────────────────────────────────────
 
@@ -57,6 +64,44 @@ app.onError((err, ctx) => {
 // ─── Start server ────────────────────────────────────────────────────
 
 const port = Number(process.env.PORT ?? DEFAULT_API_PORT);
+
+// Apply pending DB migrations
+migrate(db, { migrationsFolder: resolve(import.meta.dir, "../drizzle") });
+
+// Ensure tables added in later migrations exist (safety net for bun-sqlite migrator quirks)
+sqlite.run(`
+  CREATE TABLE IF NOT EXISTS runners (
+    id TEXT PRIMARY KEY NOT NULL,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+console.log("✓ Migrations applied");
+
+// Run file sync before accepting requests
+await startupSync();
+
+// Seed default OpenCode runner if none exists
+const existingRunners = await db.select().from(runners).all();
+if (existingRunners.length === 0) {
+  const now = new Date().toISOString();
+  await db.insert(runners).values({
+    id: randomUUID(),
+    type: "opencode",
+    name: "OpenCode",
+    config: JSON.stringify({ binaryPath: "opencode", defaultModel: "" }),
+    enabled: true,
+    status: "unknown",
+    createdAt: now,
+    updatedAt: now,
+  });
+  console.log("✓ Default OpenCode runner seeded");
+}
 
 console.log(`🚀 AgentForge API running on http://localhost:${port}`);
 console.log(`   Health: http://localhost:${port}/api/health`);

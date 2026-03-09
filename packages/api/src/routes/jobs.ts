@@ -13,8 +13,7 @@ export const jobsRouter = new Hono();
 const createJobBody = z.object({
   prompt: z.string().min(1),
   projectId: z.string().uuid(),
-  agentId: z.string().uuid(),
-  modelOverride: z.string().optional(),
+  playbookId: z.string().uuid(),
 });
 
 const listQuerySchema = z.object({
@@ -24,7 +23,7 @@ const listQuerySchema = z.object({
 
 /** GET /api/v1/jobs?project_id=X — List jobs, optionally filtered by project */
 jobsRouter.get("/", zValidator("query", listQuerySchema), async (ctx) => {
-  const { project_id, status } = ctx.req.valid("query");
+  const { project_id } = ctx.req.valid("query");
 
   let query = db.select().from(jobs).orderBy(desc(jobs.createdAt)).$dynamic();
 
@@ -44,7 +43,7 @@ jobsRouter.get("/:id", async (ctx) => {
   return ctx.json({ data: row });
 });
 
-/** POST /api/v1/jobs — Create a new job (direct agent task) */
+/** POST /api/v1/jobs — Create a job linked to a playbook */
 jobsRouter.post(
   "/",
   zValidator("json", createJobBody),
@@ -57,8 +56,7 @@ jobsRouter.post(
       id,
       prompt: body.prompt,
       projectId: body.projectId,
-      agentId: body.agentId,
-      modelOverride: body.modelOverride ?? null,
+      playbookId: body.playbookId,
       status: JOB_STATUS.PENDING,
       createdAt: now,
     });

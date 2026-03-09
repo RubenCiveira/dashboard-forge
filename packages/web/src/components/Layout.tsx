@@ -12,7 +12,10 @@ async function fetchProjects(): Promise<Project[]> {
 const NAV_LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/agents", label: "Agents" },
-  { href: "/models", label: "Models" },
+  { href: "/skills", label: "Skills" },
+  { href: "/playbooks", label: "Playbooks" },
+  { href: "/ollama", label: "Ollama" },
+  { href: "/runners", label: "Runners" },
 ];
 
 export default function Layout(props: { children?: JSX.Element }) {

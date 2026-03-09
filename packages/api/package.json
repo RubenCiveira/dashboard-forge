@@ -15,6 +15,7 @@
     "@agentforge/shared": "workspace:*",
     "@hono/zod-validator": "^0.7.6",
     "drizzle-orm": "^0.38.0",
+    "fflate": "^0.8.2",
     "hono": "^4.7.0",
     "zod": "^3.24.0"
   },

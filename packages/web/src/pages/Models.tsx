@@ -1,41 +1,122 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import type { InstanceConfig, Model, OllamaModel } from "@agentforge/shared";
 
+// ─── Types ───────────────────────────────────────────────────────────
+
+interface OCModel { id: string; provider: string; modelId: string }
+
 // ─── API helpers ─────────────────────────────────────────────────────
 
 async function fetchConfig(): Promise<InstanceConfig> {
   const res = await fetch("/api/v1/config");
-  const json = await res.json() as { data: InstanceConfig };
-  return json.data;
+  return (await res.json() as { data: InstanceConfig }).data;
 }
 
-async function fetchConfiguredModels(): Promise<Model[]> {
+async function fetchModels(): Promise<Model[]> {
   const res = await fetch("/api/v1/models");
-  const json = await res.json() as { data: Model[] };
-  return json.data;
+  return (await res.json() as { data: Model[] }).data;
+}
+
+async function fetchOCModels(): Promise<OCModel[]> {
+  const res = await fetch("/api/v1/models/opencode");
+  if (!res.ok) return [];
+  return (await res.json() as { data: OCModel[] }).data;
 }
 
 async function fetchOllamaModels(): Promise<OllamaModel[]> {
   const res = await fetch("/api/v1/models/ollama");
   if (!res.ok) return [];
-  const json = await res.json() as { data: OllamaModel[] };
-  return json.data;
+  return (await res.json() as { data: OllamaModel[] }).data;
 }
 
 // ─── Component ───────────────────────────────────────────────────────
 
 export default function Models() {
-  const [config, { refetch: refetchConfig }] = createResource(fetchConfig);
-  const [configuredModels, { refetch: refetchConfigured }] = createResource(fetchConfiguredModels);
-  const [ollamaModels, { refetch: refetchOllama }] = createResource(fetchOllamaModels);
+  const [config, { refetch: refetchConfig }]  = createResource(fetchConfig);
+  const [models, { refetch: refetchModels }]  = createResource(fetchModels);
+  const [ocModels]                            = createResource(fetchOCModels);
+  const [ollama, { refetch: refetchOllama }]  = createResource(fetchOllamaModels);
 
-  // Config edit state
+  // OpenCode catalog filter
+  const [search, setSearch] = createSignal("");
+
+  // Manual add form (for models not in OC catalog)
+  const [newModel, setNewModel] = createSignal("");
+  const [adding, setAdding]     = createSignal(false);
+
+  // Ollama panel
+  const [ollamaOpen, setOllamaOpen] = createSignal(false);
   const [editingUrl, setEditingUrl] = createSignal(false);
-  const [urlDraft, setUrlDraft] = createSignal("");
+  const [urlDraft, setUrlDraft]     = createSignal("");
+  const [pulling, setPulling]       = createSignal<string | null>(null);
+  const [pullLog, setPullLog]       = createSignal("");
 
-  // Pull state
-  const [pulling, setPulling] = createSignal<string | null>(null);
-  const [pullLog, setPullLog] = createSignal("");
+  // ── derived ──────────────────────────────────────────────────────
+
+  /** Set of modelId values already added to our DB */
+  const addedIds = () => new Set(models()?.map((m) => `${m.provider}/${m.modelId}`) ?? []);
+
+  /** OpenCode catalog grouped by provider, filtered by search */
+  const groupedOCModels = () => {
+    const q = search().toLowerCase();
+    const all = (ocModels() ?? []).filter(
+      (m) => !q || m.id.toLowerCase().includes(q),
+    );
+    const map = new Map<string, OCModel[]>();
+    for (const m of all) {
+      if (!map.has(m.provider)) map.set(m.provider, []);
+      map.get(m.provider)!.push(m);
+    }
+    // Return sorted providers
+    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+  };
+
+  /** Models in DB that are NOT from the OpenCode catalog (manually added) */
+  const extraModels = () => {
+    const ocIds = new Set((ocModels() ?? []).map((m) => m.id));
+    return (models() ?? []).filter((m) => !ocIds.has(`${m.provider}/${m.modelId}`));
+  };
+
+  const ollamaEnabled = () => config()?.ollama.enabled ?? false;
+
+  // ── actions ──────────────────────────────────────────────────────
+
+  async function addModel(provider: string, modelId: string) {
+    await fetch("/api/v1/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, modelId, displayName: `${provider}/${modelId}`, enabled: true }),
+    });
+    refetchModels();
+  }
+
+  async function removeModelByKey(key: string) {
+    const m = models()?.find((m) => `${m.provider}/${m.modelId}` === key);
+    if (!m) return;
+    await fetch(`/api/v1/models/${m.id}`, { method: "DELETE" });
+    refetchModels();
+  }
+
+  async function removeModelById(id: string) {
+    await fetch(`/api/v1/models/${id}`, { method: "DELETE" });
+    refetchModels();
+  }
+
+  async function addModelManual() {
+    const s = newModel().trim();
+    if (!s) return;
+    const slash = s.indexOf("/");
+    const provider = slash > 0 ? s.slice(0, slash) : "unknown";
+    const modelId  = slash > 0 ? s.slice(slash + 1) : s;
+    setAdding(true);
+    await addModel(provider, modelId);
+    setNewModel("");
+    setAdding(false);
+  }
+
+  async function addFromOllama(m: OllamaModel) {
+    await addModel("ollama", m.name);
+  }
 
   async function saveOllamaUrl() {
     const url = urlDraft().trim();
@@ -58,18 +139,17 @@ export default function Models() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
-    const reader = res.body?.getReader();
+    const reader  = res.body?.getReader();
     const decoder = new TextDecoder();
     if (!reader) { setPulling(null); return; }
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const lines = decoder.decode(value).split("\n").filter((l) => l.startsWith("data:"));
-      for (const line of lines) {
+      for (const line of decoder.decode(value).split("\n").filter((l) => l.startsWith("data:"))) {
         try {
-          const status = JSON.parse(line.slice(5)) as { status: string; completed?: number; total?: number };
-          const pct = status.total ? ` (${Math.round((status.completed ?? 0) / status.total * 100)}%)` : "";
-          setPullLog(`${status.status}${pct}`);
+          const s = JSON.parse(line.slice(5)) as { status: string; completed?: number; total?: number };
+          const pct = s.total ? ` ${Math.round((s.completed ?? 0) / s.total * 100)}%` : "";
+          setPullLog(`${s.status}${pct}`);
         } catch { /* ignore */ }
       }
     }
@@ -77,199 +157,288 @@ export default function Models() {
     refetchOllama();
   }
 
-  async function addModel(ollamaModel: OllamaModel) {
-    await fetch("/api/v1/models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: "ollama",
-        modelId: ollamaModel.name,
-        displayName: ollamaModel.name,
-        enabled: true,
-      }),
-    });
-    refetchConfigured();
-  }
-
-  async function toggleModel(id: string, enabled: boolean) {
-    await fetch(`/api/v1/models/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    });
-    refetchConfigured();
-  }
-
-  async function removeModel(id: string) {
-    await fetch(`/api/v1/models/${id}`, { method: "DELETE" });
-    refetchConfigured();
-  }
-
-  const configuredIds = () => new Set(configuredModels()?.map((m) => m.modelId) ?? []);
+  // ── render ───────────────────────────────────────────────────────
 
   return (
-    <div class="p-8">
-      <div class="max-w-4xl mx-auto">
-        <h1 class="text-2xl font-bold mb-1">Models</h1>
-        <p class="text-gray-400 text-sm mb-8">Configure usable models for your OpenCode agents</p>
+    <div class="p-8 max-w-4xl">
 
-        {/* ── Ollama Config ─────────────────────────────────────────── */}
-        <section class="mb-8 p-6 bg-gray-900 rounded-lg border border-gray-800">
-          <h2 class="text-lg font-semibold mb-4">Ollama Instance</h2>
+      {/* ── Header ───────────────────────────────────────────────── */}
+      <div class="mb-6">
+        <h1 class="text-2xl font-bold">Models</h1>
+        <p class="text-gray-400 text-sm">
+          {(models() ?? []).length} active in AgentForge
+          <Show when={(ocModels() ?? []).length > 0}>
+            <span class="text-gray-600"> · {(ocModels() ?? []).length} available from OpenCode</span>
+          </Show>
+        </p>
+      </div>
 
-          <Show when={!editingUrl()} fallback={
-            <div class="flex gap-3 items-center">
+      {/* ── OpenCode catalog (primary) ────────────────────────────── */}
+      <section class="mb-6 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-800">
+          <h2 class="font-semibold mb-1">OpenCode Catalog</h2>
+          <p class="text-xs text-gray-500">Models available through your OpenCode installation. Click <span class="text-emerald-400">Add</span> to activate them in AgentForge.</p>
+        </div>
+
+        <Show
+          when={!ocModels.loading}
+          fallback={<p class="px-5 py-4 text-sm text-gray-500">Loading OpenCode models…</p>}
+        >
+          <Show
+            when={(ocModels() ?? []).length > 0}
+            fallback={
+              <p class="px-5 py-4 text-sm text-gray-600">
+                OpenCode CLI not found or returned no models.
+              </p>
+            }
+          >
+            {/* Search */}
+            <div class="px-5 py-3 border-b border-gray-800">
               <input
-                class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                value={urlDraft()}
-                onInput={(e) => setUrlDraft(e.currentTarget.value)}
-                onKeyDown={(e) => e.key === "Enter" && saveOllamaUrl()}
-                placeholder="http://localhost:11434"
+                class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-emerald-500 placeholder-gray-600"
+                placeholder="Filter models…"
+                value={search()}
+                onInput={(e) => setSearch(e.currentTarget.value)}
               />
-              <button
-                onClick={saveOllamaUrl}
-                class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded text-sm font-medium transition-colors"
-              >
-                Save
-              </button>
-              <button
-                onClick={() => setEditingUrl(false)}
-                class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors"
-              >
-                Cancel
-              </button>
             </div>
-          }>
-            <div class="flex gap-3 items-center">
-              <span class="flex-1 font-mono text-sm text-gray-300">
-                {config()?.ollama.baseUrl ?? "loading..."}
-              </span>
-              <Show when={config()}>
-                <span class={`text-xs px-2 py-0.5 rounded-full ${config()!.ollama.enabled ? "bg-emerald-900 text-emerald-300" : "bg-gray-700 text-gray-400"}`}>
-                  {config()!.ollama.enabled ? "enabled" : "disabled"}
-                </span>
-              </Show>
-              <button
-                onClick={() => { setUrlDraft(config()?.ollama.baseUrl ?? ""); setEditingUrl(true); }}
-                class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors"
-              >
-                Edit
-              </button>
-            </div>
-          </Show>
-        </section>
 
-        {/* ── Ollama Available Models ───────────────────────────────── */}
-        <section class="mb-8 p-6 bg-gray-900 rounded-lg border border-gray-800">
-          <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold">Installed in Ollama</h2>
-            <button
-              onClick={refetchOllama}
-              class="text-sm text-gray-400 hover:text-gray-200 transition-colors"
-            >
-              Refresh
-            </button>
-          </div>
-
-          <Show when={pulling()}>
-            <div class="mb-4 p-3 bg-gray-800 rounded text-sm text-gray-300">
-              Pulling <span class="text-emerald-400 font-mono">{pulling()}</span>…{" "}
-              <span class="text-gray-400">{pullLog()}</span>
-            </div>
-          </Show>
-
-          <Show
-            when={!ollamaModels.loading}
-            fallback={<p class="text-gray-500 text-sm">Connecting to Ollama…</p>}
-          >
-            <Show
-              when={(ollamaModels() ?? []).length > 0}
-              fallback={
-                <div class="text-gray-500 text-sm">
-                  <p>No models found. Pull one below.</p>
-                  <PullForm onPull={pullModel} pulling={pulling()} />
-                </div>
-              }
-            >
-              <div class="space-y-2">
-                <For each={ollamaModels()}>
-                  {(m) => (
-                    <div class="flex items-center gap-3 py-2 border-b border-gray-800 last:border-0">
-                      <div class="flex-1 min-w-0">
-                        <p class="font-mono text-sm truncate">{m.name}</p>
-                        <p class="text-xs text-gray-500">
-                          {(m.size / 1e9).toFixed(1)} GB
-                          {m.details?.parameter_size && ` · ${m.details.parameter_size}`}
-                          {m.details?.quantization_level && ` · ${m.details.quantization_level}`}
-                        </p>
-                      </div>
-                      <Show
-                        when={!configuredIds().has(m.name)}
-                        fallback={
-                          <span class="text-xs text-emerald-400 px-2 py-1 bg-emerald-900/40 rounded">Added</span>
-                        }
-                      >
-                        <button
-                          onClick={() => addModel(m)}
-                          class="text-xs px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded transition-colors"
-                        >
-                          + Add
-                        </button>
-                      </Show>
-                    </div>
-                  )}
-                </For>
-              </div>
-              <PullForm onPull={pullModel} pulling={pulling()} />
-            </Show>
-          </Show>
-        </section>
-
-        {/* ── Configured Models ─────────────────────────────────────── */}
-        <section class="p-6 bg-gray-900 rounded-lg border border-gray-800">
-          <h2 class="text-lg font-semibold mb-4">Configured Models</h2>
-          <p class="text-xs text-gray-500 mb-4">These models are available when configuring agents in OpenCode.</p>
-
-          <Show
-            when={(configuredModels() ?? []).length > 0}
-            fallback={<p class="text-gray-500 text-sm">No models configured yet. Add one from the list above.</p>}
-          >
-            <div class="space-y-2">
-              <For each={configuredModels()}>
-                {(m) => (
-                  <div class="flex items-center gap-3 py-2 border-b border-gray-800 last:border-0">
-                    <div class="flex-1 min-w-0">
-                      <p class="font-mono text-sm">{m.modelId}</p>
-                      <p class="text-xs text-gray-500 capitalize">{m.provider}</p>
-                    </div>
-                    <button
-                      onClick={() => toggleModel(m.id, !m.enabled)}
-                      class={`text-xs px-2 py-1 rounded transition-colors ${
-                        m.enabled
-                          ? "bg-emerald-900 text-emerald-300 hover:bg-emerald-800"
-                          : "bg-gray-700 text-gray-400 hover:bg-gray-600"
-                      }`}
-                    >
-                      {m.enabled ? "Enabled" : "Disabled"}
-                    </button>
-                    <button
-                      onClick={() => removeModel(m.id)}
-                      class="text-xs px-2 py-1 text-red-400 hover:text-red-300 transition-colors"
-                    >
-                      Remove
-                    </button>
-                  </div>
+            {/* Provider groups */}
+            <div class="divide-y divide-gray-800">
+              <For each={groupedOCModels()}>
+                {([provider, providerModels]) => (
+                  <ProviderGroup
+                    provider={provider}
+                    models={providerModels}
+                    addedIds={addedIds()}
+                    onAdd={(m) => addModel(m.provider, m.modelId)}
+                    onRemove={(m) => removeModelByKey(m.id)}
+                  />
                 )}
               </For>
             </div>
           </Show>
-        </section>
-      </div>
+        </Show>
+
+        {/* Manually added models outside OC catalog */}
+        <Show when={extraModels().length > 0}>
+          <div class="border-t border-gray-800 px-5 py-3">
+            <p class="text-xs text-gray-500 mb-2">Custom / manually added</p>
+            <For each={extraModels()}>
+              {(m) => (
+                <div class="flex items-center gap-3 py-1.5">
+                  <span class="flex-1 font-mono text-sm text-gray-300">{m.provider}/{m.modelId}</span>
+                  <button onClick={() => removeModelById(m.id)} class="text-xs text-gray-600 hover:text-red-400 transition-colors">Remove</button>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
+
+        {/* Manual add */}
+        <div class="px-5 py-4 border-t border-gray-800">
+          <p class="text-xs text-gray-500 mb-2">Add a model manually <span class="text-gray-600">(not in catalog)</span></p>
+          <div class="flex gap-2">
+            <input
+              class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder-gray-600"
+              placeholder="provider/model-id  e.g. anthropic/claude-opus-4"
+              value={newModel()}
+              onInput={(e) => setNewModel(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && addModelManual()}
+              disabled={adding()}
+            />
+            <button
+              onClick={addModelManual}
+              disabled={adding() || !newModel().trim()}
+              class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 rounded text-sm font-medium transition-colors whitespace-nowrap"
+            >
+              Add
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Ollama (secondary, collapsible) ──────────────────────── */}
+      <section class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+
+        <div
+          class="px-5 py-4 flex items-center justify-between cursor-pointer hover:bg-gray-800/40 transition-colors"
+          onClick={() => setOllamaOpen((v) => !v)}
+        >
+          <div class="flex items-center gap-3">
+            <span class="text-gray-500 text-xs">{ollamaOpen() ? "▾" : "▸"}</span>
+            <div>
+              <h2 class="font-semibold">Local Ollama</h2>
+              <Show when={config()}>
+                <p class="text-xs text-gray-500 font-mono mt-0.5">{config()!.ollama.baseUrl}</p>
+              </Show>
+            </div>
+          </div>
+          <Show when={config()}>
+            <span class={`text-xs px-2 py-0.5 rounded-full ${ollamaEnabled() ? "bg-emerald-900/60 text-emerald-400" : "bg-gray-700 text-gray-500"}`}>
+              {ollamaEnabled() ? "connected" : "disabled"}
+            </span>
+          </Show>
+        </div>
+
+        <Show when={ollamaOpen()}>
+          <div class="border-t border-gray-800">
+
+            {/* URL config */}
+            <div class="px-5 py-4 border-b border-gray-800">
+              <p class="text-xs text-gray-500 mb-2">Server URL</p>
+              <Show
+                when={!editingUrl()}
+                fallback={
+                  <div class="flex gap-2">
+                    <input
+                      class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500"
+                      value={urlDraft()}
+                      onInput={(e) => setUrlDraft(e.currentTarget.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveOllamaUrl()}
+                      placeholder="http://localhost:11434"
+                    />
+                    <button onClick={saveOllamaUrl} class="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm transition-colors">Save</button>
+                    <button onClick={() => setEditingUrl(false)} class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors">Cancel</button>
+                  </div>
+                }
+              >
+                <div class="flex items-center gap-3">
+                  <span class="flex-1 font-mono text-sm text-gray-300">{config()?.ollama.baseUrl}</span>
+                  <button
+                    onClick={() => { setUrlDraft(config()?.ollama.baseUrl ?? ""); setEditingUrl(true); }}
+                    class="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+                  >
+                    Edit
+                  </button>
+                </div>
+              </Show>
+            </div>
+
+            {/* Pull progress */}
+            <Show when={pulling()}>
+              <div class="px-5 py-3 bg-gray-800/60 border-b border-gray-800 text-sm">
+                Pulling <span class="text-emerald-400 font-mono">{pulling()}</span>
+                <span class="text-gray-400 ml-2">{pullLog()}</span>
+              </div>
+            </Show>
+
+            {/* Installed models */}
+            <div class="px-5 py-4">
+              <div class="flex items-center justify-between mb-3">
+                <p class="text-xs text-gray-500">Installed models</p>
+                <button onClick={refetchOllama} class="text-xs text-gray-500 hover:text-gray-300 transition-colors">Refresh</button>
+              </div>
+
+              <Show
+                when={!ollama.loading}
+                fallback={<p class="text-gray-600 text-sm">Connecting…</p>}
+              >
+                <Show
+                  when={(ollama() ?? []).length > 0}
+                  fallback={<p class="text-gray-600 text-sm mb-4">No models installed.</p>}
+                >
+                  <div class="space-y-1 mb-5">
+                    <For each={ollama()}>
+                      {(m) => (
+                        <div class="flex items-center gap-3 py-2 border-b border-gray-800/60 last:border-0">
+                          <div class="flex-1 min-w-0">
+                            <p class="font-mono text-sm truncate">{m.name}</p>
+                            <p class="text-xs text-gray-600">
+                              {(m.size / 1e9).toFixed(1)} GB
+                              {m.details?.parameter_size     && ` · ${m.details.parameter_size}`}
+                              {m.details?.quantization_level && ` · ${m.details.quantization_level}`}
+                            </p>
+                          </div>
+                          <Show
+                            when={!addedIds().has(`ollama/${m.name}`)}
+                            fallback={<span class="text-xs text-emerald-500 px-2 py-1 bg-emerald-900/30 rounded">Added</span>}
+                          >
+                            <button
+                              onClick={() => addFromOllama(m)}
+                              class="text-xs px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded transition-colors"
+                            >
+                              + Add
+                            </button>
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </Show>
+
+              <PullForm onPull={pullModel} pulling={pulling()} />
+            </div>
+          </div>
+        </Show>
+      </section>
     </div>
   );
 }
 
-// ─── Pull Form subcomponent ───────────────────────────────────────────
+// ─── ProviderGroup ────────────────────────────────────────────────────
+
+function ProviderGroup(props: {
+  provider: string;
+  models: OCModel[];
+  addedIds: Set<string>;
+  onAdd: (m: OCModel) => void;
+  onRemove: (m: OCModel) => void;
+}) {
+  const [open, setOpen] = createSignal(false);
+  const addedCount = () => props.models.filter((m) => props.addedIds.has(m.id)).length;
+
+  return (
+    <div>
+      <button
+        class="w-full flex items-center gap-3 px-5 py-3 hover:bg-gray-800/40 transition-colors text-left"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span class="text-gray-500 text-xs w-3">{open() ? "▾" : "▸"}</span>
+        <span class="font-mono text-sm flex-1">{props.provider}</span>
+        <span class="text-xs text-gray-600">{props.models.length} models</span>
+        <Show when={addedCount() > 0}>
+          <span class="text-xs text-emerald-500 bg-emerald-900/30 px-2 py-0.5 rounded">{addedCount()} active</span>
+        </Show>
+      </button>
+
+      <Show when={open()}>
+        <div class="bg-gray-800/20">
+          <For each={props.models}>
+            {(m) => {
+              const added = () => props.addedIds.has(m.id);
+              return (
+                <div class="flex items-center gap-3 px-8 py-2 border-t border-gray-800/40 hover:bg-gray-800/30 transition-colors">
+                  <span class="flex-1 font-mono text-sm text-gray-300">{m.modelId}</span>
+                  <Show
+                    when={!added()}
+                    fallback={
+                      <button
+                        onClick={() => props.onRemove(m)}
+                        class="text-xs text-emerald-500 hover:text-red-400 px-2 py-1 transition-colors"
+                      >
+                        ✓ Active
+                      </button>
+                    }
+                  >
+                    <button
+                      onClick={() => props.onAdd(m)}
+                      class="text-xs px-3 py-1 bg-gray-700 hover:bg-emerald-700 rounded transition-colors"
+                    >
+                      Add
+                    </button>
+                  </Show>
+                </div>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+// ─── PullForm ─────────────────────────────────────────────────────────
 
 function PullForm(props: { onPull: (name: string) => void; pulling: string | null }) {
   const [name, setName] = createSignal("");
@@ -280,22 +449,25 @@ function PullForm(props: { onPull: (name: string) => void; pulling: string | nul
   }
 
   return (
-    <div class="mt-4 flex gap-2">
-      <input
-        class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder-gray-600"
-        placeholder="e.g. llama3.2, qwen3:8b"
-        value={name()}
-        onInput={(e) => setName(e.currentTarget.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        disabled={!!props.pulling}
-      />
-      <button
-        onClick={submit}
-        disabled={!!props.pulling || !name().trim()}
-        class="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 rounded text-sm transition-colors"
-      >
-        Pull
-      </button>
+    <div>
+      <p class="text-xs text-gray-500 mb-2">Pull a new model</p>
+      <div class="flex gap-2">
+        <input
+          class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500 placeholder-gray-600"
+          placeholder="qwen3:8b  ·  llama3.2  ·  deepseek-r1:7b"
+          value={name()}
+          onInput={(e) => setName(e.currentTarget.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          disabled={!!props.pulling}
+        />
+        <button
+          onClick={submit}
+          disabled={!!props.pulling || !name().trim()}
+          class="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 rounded text-sm transition-colors"
+        >
+          {props.pulling ? "Pulling…" : "Pull"}
+        </button>
+      </div>
     </div>
   );
 }

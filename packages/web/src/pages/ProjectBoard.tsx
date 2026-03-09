@@ -1,13 +1,12 @@
 import { createResource, createSignal, For, Show, onCleanup } from "solid-js";
 import { useParams } from "@solidjs/router";
-import type { Agent, Model } from "@agentforge/shared";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
 interface Job {
   id: string;
   prompt: string;
-  agentId: string | null;
+  playbookId: string | null;
   status: string;
   summary: string | null;
   createdAt: string;
@@ -19,6 +18,14 @@ interface Project {
   id: string;
   name: string;
   sourcePath: string;
+}
+
+interface Playbook {
+  id: string;
+  name: string;
+  description: string;
+  permissionProfile: string;
+  agentIds: string[];
 }
 
 // ─── Kanban config ───────────────────────────────────────────────────
@@ -33,34 +40,24 @@ const COLUMNS = [
 const DONE_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function columnForJob(status: string): string {
-  if (DONE_STATUSES.has(status)) return "done";
-  return status;
+  return DONE_STATUSES.has(status) ? "done" : status;
 }
 
 // ─── API helpers ─────────────────────────────────────────────────────
 
 async function fetchProject(id: string): Promise<Project> {
   const res = await fetch(`/api/v1/projects/${id}`);
-  const json = await res.json() as { data: Project };
-  return json.data;
+  return (await res.json() as { data: Project }).data;
 }
 
 async function fetchJobs(projectId: string): Promise<Job[]> {
   const res = await fetch(`/api/v1/jobs?project_id=${projectId}`);
-  const json = await res.json() as { data: Job[] };
-  return json.data;
+  return (await res.json() as { data: Job[] }).data;
 }
 
-async function fetchAgents(): Promise<Agent[]> {
-  const res = await fetch("/api/v1/agents");
-  const json = await res.json() as { data: Agent[] };
-  return json.data;
-}
-
-async function fetchModels(): Promise<Model[]> {
-  const res = await fetch("/api/v1/models");
-  const json = await res.json() as { data: Model[] };
-  return json.data.filter((m) => m.enabled);
+async function fetchPlaybooks(): Promise<Playbook[]> {
+  const res = await fetch("/api/v1/playbooks");
+  return (await res.json() as { data: Playbook[] }).data;
 }
 
 // ─── Component ───────────────────────────────────────────────────────
@@ -69,26 +66,20 @@ export default function ProjectBoard() {
   const params = useParams<{ id: string }>();
 
   const [project] = createResource(() => params.id, fetchProject);
-  const [agents] = createResource(fetchAgents);
-  const [enabledModels] = createResource(fetchModels);
+  const [playbooks] = createResource(fetchPlaybooks);
 
-  // Jobs with polling every 5 s
-  const [jobs, { refetch: refetchJobs }] = createResource(
-    () => params.id,
-    fetchJobs,
-  );
+  const [jobs, { refetch: refetchJobs }] = createResource(() => params.id, fetchJobs);
   const interval = setInterval(refetchJobs, 5000);
   onCleanup(() => clearInterval(interval));
 
-  // New task modal
+  // Modal state
   const [showModal, setShowModal] = createSignal(false);
-  const [selectedAgent, setSelectedAgent] = createSignal("");
-  const [selectedModel, setSelectedModel] = createSignal("");
+  const [selectedPlaybook, setSelectedPlaybook] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [submitting, setSubmitting] = createSignal(false);
 
   async function submitTask() {
-    if (!selectedAgent() || !prompt().trim()) return;
+    if (!selectedPlaybook() || !prompt().trim()) return;
     setSubmitting(true);
     await fetch("/api/v1/jobs", {
       method: "POST",
@@ -96,13 +87,11 @@ export default function ProjectBoard() {
       body: JSON.stringify({
         prompt: prompt().trim(),
         projectId: params.id,
-        agentId: selectedAgent(),
-        modelOverride: selectedModel() || undefined,
+        playbookId: selectedPlaybook(),
       }),
     });
     setPrompt("");
-    setSelectedAgent("");
-    setSelectedModel("");
+    setSelectedPlaybook("");
     setShowModal(false);
     setSubmitting(false);
     refetchJobs();
@@ -113,10 +102,10 @@ export default function ProjectBoard() {
     refetchJobs();
   }
 
-  const agentMap = () => {
-    const map: Record<string, Agent> = {};
-    for (const a of agents() ?? []) map[a.id] = a;
-    return map;
+  const playbookMap = () => {
+    const m: Record<string, Playbook> = {};
+    for (const p of playbooks() ?? []) m[p.id] = p;
+    return m;
   };
 
   const jobsByColumn = () => {
@@ -128,13 +117,19 @@ export default function ProjectBoard() {
     return cols;
   };
 
+  const profileColor: Record<string, string> = {
+    autonomous:  "text-emerald-400",
+    assisted:    "text-amber-400",
+    restrictive: "text-red-400",
+  };
+
   return (
     <div class="flex flex-col h-full">
 
       {/* ── Header ───────────────────────────────────────────────── */}
       <div class="flex items-center justify-between px-8 py-5 border-b border-gray-800 flex-shrink-0">
         <div>
-          <Show when={project()} fallback={<div class="h-6 w-40 bg-gray-800 rounded animate-pulse" />}>
+          <Show when={project()} fallback={<div class="h-6 w-48 bg-gray-800 rounded animate-pulse" />}>
             <h1 class="text-xl font-bold">{project()!.name}</h1>
             <p class="text-xs text-gray-500 font-mono mt-0.5">{project()!.sourcePath}</p>
           </Show>
@@ -156,21 +151,17 @@ export default function ProjectBoard() {
               const colJobs = () => jobsByColumn()[col.key] ?? [];
               return (
                 <div class={`flex flex-col w-72 flex-shrink-0 rounded-lg border ${col.border} bg-gray-900/60`}>
-                  {/* Column header */}
                   <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
                     <span class={`text-sm font-semibold ${col.color}`}>{col.label}</span>
-                    <span class="text-xs text-gray-600 bg-gray-800 px-2 py-0.5 rounded-full">
-                      {colJobs().length}
-                    </span>
+                    <span class="text-xs text-gray-600 bg-gray-800 px-2 py-0.5 rounded-full">{colJobs().length}</span>
                   </div>
 
-                  {/* Cards */}
                   <div class="flex-1 overflow-y-auto p-3 space-y-2">
                     <Show
                       when={!jobs.loading}
                       fallback={
                         <div class="space-y-2">
-                          <div class="h-16 bg-gray-800 rounded animate-pulse" />
+                          <div class="h-20 bg-gray-800 rounded animate-pulse" />
                           <div class="h-16 bg-gray-800 rounded animate-pulse" />
                         </div>
                       }
@@ -181,7 +172,9 @@ export default function ProjectBoard() {
                         {(job) => (
                           <JobCard
                             job={job}
-                            agentName={agentMap()[job.agentId ?? ""]?.name}
+                            playbookName={playbookMap()[job.playbookId ?? ""]?.name}
+                            playbookProfile={playbookMap()[job.playbookId ?? ""]?.permissionProfile}
+                            profileColor={profileColor}
                             onCancel={() => cancelJob(job.id)}
                           />
                         )}
@@ -204,43 +197,56 @@ export default function ProjectBoard() {
           <div class="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg mx-4 p-6 space-y-4">
             <h2 class="text-lg font-semibold">New Task</h2>
 
-            {/* Agent selector */}
+            {/* Playbook selector */}
             <div>
-              <label class="text-xs text-gray-400 block mb-1.5">Agent *</label>
+              <label class="text-xs text-gray-400 block mb-1.5">Playbook *</label>
               <Show
-                when={(agents() ?? []).length > 0}
+                when={(playbooks() ?? []).length > 0}
                 fallback={
                   <p class="text-xs text-gray-500 bg-gray-800 rounded px-3 py-2">
-                    No agents registered yet. <a href="/agents" class="text-emerald-400 hover:underline">Add one first.</a>
+                    No playbooks configured. <a href="/playbooks" class="text-emerald-400 hover:underline">Create one first.</a>
                   </p>
                 }
               >
-                <select
-                  class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                  value={selectedAgent()}
-                  onChange={(e) => setSelectedAgent(e.currentTarget.value)}
-                >
-                  <option value="">Select an agent…</option>
-                  <For each={agents()}>
-                    {(a) => <option value={a.id}>{a.name}</option>}
+                <div class="space-y-2">
+                  <For each={playbooks()}>
+                    {(pb) => {
+                      const selected = () => selectedPlaybook() === pb.id;
+                      return (
+                        <label
+                          class={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                            selected()
+                              ? "border-emerald-600 bg-emerald-900/20"
+                              : "border-gray-700 bg-gray-800 hover:border-gray-600"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="playbook"
+                            class="mt-0.5 accent-emerald-500"
+                            checked={selected()}
+                            onChange={() => setSelectedPlaybook(pb.id)}
+                          />
+                          <div class="min-w-0">
+                            <div class="flex items-center gap-2">
+                              <span class="text-sm font-medium">{pb.name}</span>
+                              <span class={`text-xs ${profileColor[pb.permissionProfile] ?? "text-gray-400"}`}>
+                                {pb.permissionProfile}
+                              </span>
+                              <Show when={pb.agentIds.length > 0}>
+                                <span class="text-xs text-gray-500">{pb.agentIds.length} agent{pb.agentIds.length !== 1 ? "s" : ""}</span>
+                              </Show>
+                            </div>
+                            <Show when={pb.description}>
+                              <p class="text-xs text-gray-500 mt-0.5">{pb.description}</p>
+                            </Show>
+                          </div>
+                        </label>
+                      );
+                    }}
                   </For>
-                </select>
+                </div>
               </Show>
-            </div>
-
-            {/* Model selector */}
-            <div>
-              <label class="text-xs text-gray-400 block mb-1.5">Model <span class="text-gray-600">(optional — uses project default)</span></label>
-              <select
-                class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                value={selectedModel()}
-                onChange={(e) => setSelectedModel(e.currentTarget.value)}
-              >
-                <option value="">Project default</option>
-                <For each={enabledModels()}>
-                  {(m) => <option value={`${m.provider}/${m.modelId}`}>{m.displayName}</option>}
-                </For>
-              </select>
             </div>
 
             {/* Prompt */}
@@ -255,11 +261,10 @@ export default function ProjectBoard() {
               />
             </div>
 
-            {/* Actions */}
             <div class="flex gap-3 pt-1">
               <button
                 onClick={submitTask}
-                disabled={submitting() || !selectedAgent() || !prompt().trim()}
+                disabled={submitting() || !selectedPlaybook() || !prompt().trim()}
                 class="flex-1 py-2.5 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 rounded text-sm font-medium transition-colors"
               >
                 {submitting() ? "Creating…" : "Create Task"}
@@ -280,7 +285,13 @@ export default function ProjectBoard() {
 
 // ─── JobCard ─────────────────────────────────────────────────────────
 
-function JobCard(props: { job: Job; agentName?: string; onCancel: () => void }) {
+function JobCard(props: {
+  job: Job;
+  playbookName?: string;
+  playbookProfile?: string;
+  profileColor: Record<string, string>;
+  onCancel: () => void;
+}) {
   const canCancel = () => props.job.status === "pending" || props.job.status === "running";
 
   const statusColor: Record<string, string> = {
@@ -298,8 +309,13 @@ function JobCard(props: { job: Job; agentName?: string; onCancel: () => void }) 
 
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-1.5 min-w-0">
-          <Show when={props.agentName}>
-            <span class="text-xs text-gray-500 truncate">{props.agentName}</span>
+          <Show when={props.playbookName}>
+            <span class="text-xs text-gray-500 truncate">{props.playbookName}</span>
+            <Show when={props.playbookProfile}>
+              <span class={`text-xs ${props.profileColor[props.playbookProfile!] ?? "text-gray-500"}`}>
+                ·
+              </span>
+            </Show>
           </Show>
         </div>
         <span class={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${statusColor[props.job.status] ?? "bg-gray-700 text-gray-400"}`}>

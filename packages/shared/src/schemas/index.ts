@@ -220,6 +220,7 @@ export const autoRuleSchema = z.object({
 export const ollamaConfigSchema = z.object({
   enabled: z.boolean().default(true),
   baseUrl: z.string().url().default("http://localhost:11434"),
+  numCtx: z.number().int().min(512).default(8192),
 });
 
 export const instanceConfigSchema = z.object({
@@ -230,7 +231,7 @@ export const updateInstanceConfigSchema = instanceConfigSchema.deepPartial();
 
 // ─── Model ───────────────────────────────────────────────────────────
 
-export const modelProviderSchema = z.enum(["ollama", "openai", "anthropic", "custom"]);
+export const modelProviderSchema = z.string().min(1);
 
 export const modelSchema = z.object({
   id: z.string().uuid(),

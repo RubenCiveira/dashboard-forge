@@ -72,6 +72,33 @@ modelsRouter.delete("/:id", async (ctx) => {
   return ctx.json({ data: { id } });
 });
 
+/**
+ * GET /api/v1/models/opencode — List all models available from the OpenCode CLI.
+ * Runs `opencode models` and returns parsed entries grouped by provider.
+ */
+modelsRouter.get("/opencode", async (ctx) => {
+  try {
+    const proc = Bun.spawn(["opencode", "models"], { stdout: "pipe", stderr: "pipe" });
+    const text = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    const entries = text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const slash = line.indexOf("/");
+        return slash > 0
+          ? { provider: line.slice(0, slash), modelId: line.slice(slash + 1), id: line }
+          : { provider: "opencode", modelId: line, id: line };
+      });
+
+    return ctx.json({ data: entries });
+  } catch {
+    return ctx.json({ data: [] });
+  }
+});
+
 /** GET /api/v1/models/ollama — List models installed in local Ollama */
 modelsRouter.get("/ollama", async (ctx) => {
   const ollamaModels = await listOllamaModels();

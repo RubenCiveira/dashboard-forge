@@ -119,6 +119,19 @@ export const autoRules = sqliteTable("auto_rules", {
   createdAt: text("created_at").notNull(),
 });
 
+// ─── Runners ─────────────────────────────────────────────────────────
+
+export const runners = sqliteTable("runners", {
+  id: text("id").primaryKey(),
+  type: text("type").notNull(), // 'opencode' | 'claudecode'
+  name: text("name").notNull(),
+  config: text("config").notNull().default("{}"), // JSON: type-specific config
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  status: text("status").notNull().default("unknown"), // 'online' | 'offline' | 'unknown'
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 // ─── Models ──────────────────────────────────────────────────────────
 
 export const models = sqliteTable("models", {

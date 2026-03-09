@@ -16,4 +16,7 @@ sqlite.run("PRAGMA foreign_keys = ON");
 /** Drizzle ORM database instance */
 export const db = drizzle(sqlite, { schema });
 
+/** Raw bun:sqlite client (for migrations and DDL) */
+export { sqlite };
+
 export { schema };

@@ -1,25 +1,23 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 
-interface AgentRow {
+interface SkillRow {
   id: string;
   name: string;
   description: string;
-  model: string | null;
-  tools: string[];
   tags: string[];
   source: string;
   version: string;
 }
 
-async function fetchAgents(): Promise<{ data: AgentRow[]; total: number }> {
-  const res = await fetch("/api/v1/agents?pageSize=100");
+async function fetchSkills(): Promise<{ data: SkillRow[]; total: number }> {
+  const res = await fetch("/api/v1/skills?pageSize=100");
   return res.json();
 }
 
 const input = "w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500 placeholder-gray-600";
 
-export default function Agents() {
-  const [agents, { refetch }] = createResource(fetchAgents);
+export default function Skills() {
+  const [skills, { refetch }] = createResource(fetchSkills);
   const [importing, setImporting] = createSignal(false);
   const [status, setStatus] = createSignal<{ ok: boolean; msg: string } | null>(null);
   const [githubUrl, setGithubUrl] = createSignal("");
@@ -27,7 +25,7 @@ export default function Agents() {
   async function handleResult(res: Response) {
     const json = await res.json() as { data?: { imported: number }; error?: { message: string } };
     if (json.data !== undefined) {
-      setStatus({ ok: true, msg: `${json.data.imported} agent(s) imported` });
+      setStatus({ ok: true, msg: `${json.data.imported} skill(s) imported` });
       refetch();
     } else {
       setStatus({ ok: false, msg: json.error?.message ?? "Unknown error" });
@@ -39,7 +37,7 @@ export default function Agents() {
     setStatus(null);
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch("/api/v1/agents/import", { method: "POST", body: form });
+    const res = await fetch("/api/v1/skills/import", { method: "POST", body: form });
     await handleResult(res);
     setImporting(false);
   }
@@ -49,18 +47,17 @@ export default function Agents() {
     if (!url) return;
     setImporting(true);
     setStatus(null);
-    const res = await fetch("/api/v1/agents/import", {
+    const res = await fetch("/api/v1/skills/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
     await handleResult(res);
-    if ((await res.clone().json() as { data?: unknown }).data !== undefined) setGithubUrl("");
     setImporting(false);
   }
 
-  async function deleteAgent(id: string) {
-    await fetch(`/api/v1/agents/${id}`, { method: "DELETE" });
+  async function deleteSkill(id: string) {
+    await fetch(`/api/v1/skills/${id}`, { method: "DELETE" });
     refetch();
   }
 
@@ -69,24 +66,22 @@ export default function Agents() {
 
       {/* ── Header ─────────────────────────────────────────────── */}
       <div class="mb-6">
-        <h1 class="text-2xl font-bold">Agents</h1>
-        <p class="text-gray-400 text-sm">{agents()?.total ?? 0} registered</p>
+        <h1 class="text-2xl font-bold">Skills</h1>
+        <p class="text-gray-400 text-sm">{skills()?.total ?? 0} registered</p>
       </div>
 
       {/* ── Import panel ───────────────────────────────────────── */}
       <div class="mb-8 p-5 bg-gray-900 border border-gray-700 rounded-xl space-y-5">
-        <h2 class="font-semibold text-base">Import Agents</h2>
+        <h2 class="font-semibold text-base">Import Skills</h2>
         <p class="text-xs text-gray-500 -mt-3">
-          Agent files use the same format as Claude Code / OpenCode:
-          a <span class="font-mono">---</span> YAML frontmatter block
-          (<span class="font-mono">name</span>, <span class="font-mono">description</span>,
-          <span class="font-mono">tools</span>, <span class="font-mono">model</span>)
-          followed by the system-prompt Markdown body.
+          Each skill lives in its own subdirectory with a <span class="font-mono">SKILL.md</span> file:
+          YAML frontmatter (<span class="font-mono">name</span>, <span class="font-mono">description</span>)
+          followed by the skill's Markdown instructions.
         </p>
 
         {/* ZIP upload */}
         <div>
-          <p class="text-xs text-gray-400 mb-2">From ZIP file <span class="text-gray-600">(containing .md agent files)</span></p>
+          <p class="text-xs text-gray-400 mb-2">From ZIP file <span class="text-gray-600">(skill subdirectories each containing SKILL.md)</span></p>
           <label
             class={`flex flex-col items-center justify-center w-full h-28 border-2 border-dashed rounded-lg cursor-pointer transition-colors bg-gray-800/50 ${
               importing() ? "border-gray-700 opacity-50 pointer-events-none" : "border-gray-700 hover:border-emerald-600"
@@ -119,7 +114,7 @@ export default function Agents() {
           <div class="flex gap-2">
             <input
               class={input}
-              placeholder="https://github.com/user/repo/blob/main/agents/my-agent.md"
+              placeholder="https://github.com/user/repo/tree/main/skills/"
               value={githubUrl()}
               onInput={(e) => setGithubUrl(e.currentTarget.value)}
               onKeyDown={(e) => e.key === "Enter" && importUrl()}
@@ -134,7 +129,7 @@ export default function Agents() {
             </button>
           </div>
           <p class="text-xs text-gray-600 mt-1">
-            Blob URL (single file) or tree URL (directory of .md files)
+            Blob URL (single SKILL.md) or tree URL (directory of skill subdirectories)
           </p>
         </div>
 
@@ -149,44 +144,38 @@ export default function Agents() {
         </Show>
       </div>
 
-      {/* ── Agent list ─────────────────────────────────────────── */}
-      <Show when={!agents.loading} fallback={<p class="text-gray-500">Loading…</p>}>
+      {/* ── Skill list ─────────────────────────────────────────── */}
+      <Show when={!skills.loading} fallback={<p class="text-gray-500">Loading…</p>}>
         <Show
-          when={(agents()?.data ?? []).length > 0}
-          fallback={<p class="text-gray-600 text-sm">No agents yet. Import some above.</p>}
+          when={(skills()?.data ?? []).length > 0}
+          fallback={<p class="text-gray-600 text-sm">No skills yet. Import some above.</p>}
         >
           <div class="space-y-3">
-            <For each={agents()?.data ?? []}>
-              {(agent) => (
+            <For each={skills()?.data ?? []}>
+              {(skill) => (
                 <div class="group p-4 bg-gray-900 rounded-lg border border-gray-800 hover:border-gray-700 transition-colors">
                   <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <h3 class="font-semibold">{agent.name}</h3>
-                        <span class="text-xs text-gray-600">v{agent.version}</span>
-                        <Show when={agent.model}>
-                          <span class="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded font-mono">{agent.model}</span>
-                        </Show>
-                        <Show when={agent.source !== "local"}>
-                          <span class="text-xs bg-blue-900/30 text-blue-400 px-2 py-0.5 rounded">{agent.source}</span>
+                      <div class="flex items-center gap-2">
+                        <h3 class="font-semibold">{skill.name}</h3>
+                        <span class="text-xs text-gray-600">v{skill.version}</span>
+                        <Show when={skill.source !== "local"}>
+                          <span class="text-xs bg-blue-900/30 text-blue-400 px-2 py-0.5 rounded">{skill.source}</span>
                         </Show>
                       </div>
-                      <p class="text-gray-400 text-sm mt-1">{agent.description}</p>
-                      <Show when={agent.tools.length > 0}>
-                        <p class="text-xs text-gray-600 mt-1 font-mono">{agent.tools.join(", ")}</p>
-                      </Show>
+                      <p class="text-gray-400 text-sm mt-1">{skill.description}</p>
                     </div>
                     <button
-                      onClick={() => deleteAgent(agent.id)}
+                      onClick={() => deleteSkill(skill.id)}
                       class="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 text-xs transition-all flex-shrink-0"
                     >
                       Remove
                     </button>
                   </div>
-                  <Show when={agent.tags.length > 0}>
+                  <Show when={skill.tags.length > 0}>
                     <div class="flex flex-wrap gap-1.5 mt-3">
-                      <For each={agent.tags}>
-                        {(tag) => <span class="text-xs bg-emerald-900/40 text-emerald-300 px-2 py-0.5 rounded">{tag}</span>}
+                      <For each={skill.tags}>
+                        {(tag) => <span class="text-xs bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded">{tag}</span>}
                       </For>
                     </div>
                   </Show>
