@@ -1,5 +1,5 @@
 /**
- * Markdown file sync service.
+ * Markdown file service — file-backed storage for agents, skills and playbooks.
  *
  * Agents    → data/agents/{slug}.md
  * Skills    → data/skills/{slug}/SKILL.md
@@ -8,21 +8,21 @@
  * File format matches Claude Code / OpenCode conventions:
  *   YAML frontmatter between --- delimiters, then Markdown body.
  *
- * Playbook frontmatter fields:
- *   name, description, permission_profile, agents (comma-sep names), skills (comma-sep names)
+ * IDs are always the filename stem (slug), derived from the entity name
+ * via toSlug(). This ensures file names and IDs are always in sync.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
-import { db, schema } from "../db/index.js";
-import { eq, inArray } from "drizzle-orm";
 
 // ─── Paths ───────────────────────────────────────────────────────────
 
-const DATA_DIR       = resolve(process.cwd(), "data");
+const DATA_DIR       = resolve(import.meta.dir, "../../../../data");
 const AGENTS_DIR     = join(DATA_DIR, "agents");
 const SKILLS_DIR     = join(DATA_DIR, "skills");
 const PLAYBOOKS_DIR  = join(DATA_DIR, "playbooks");
+
+export { DATA_DIR, AGENTS_DIR, SKILLS_DIR, PLAYBOOKS_DIR };
 
 const PERMISSION_PRESETS: Record<string, Record<string, string>> = {
   autonomous:  { bash: "allow", edit: "allow", write: "allow", webfetch: "allow", externalDirectory: "allow" },
@@ -30,7 +30,7 @@ const PERMISSION_PRESETS: Record<string, Record<string, string>> = {
   restrictive: { bash: "ask",   edit: "ask",   write: "ask",   webfetch: "ask",   externalDirectory: "deny"  },
 };
 
-function ensureDirs() {
+export function ensureDirs() {
   mkdirSync(AGENTS_DIR,    { recursive: true });
   mkdirSync(SKILLS_DIR,    { recursive: true });
   mkdirSync(PLAYBOOKS_DIR, { recursive: true });
@@ -38,8 +38,8 @@ function ensureDirs() {
 
 // ─── Slug helpers ────────────────────────────────────────────────────
 
-/** Convert an arbitrary name to a filesystem-safe slug. */
-function toSlug(name: string): string {
+/** Convert an arbitrary name to a filesystem-safe slug (used as entity ID). */
+export function toSlug(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -54,7 +54,7 @@ interface Frontmatter {
 
 /**
  * Parse a YAML frontmatter block.
- * Supports only the scalar subset used by Claude Code / OpenCode:
+ * Supports the scalar subset used by Claude Code / OpenCode:
  *   key: value
  *   key: >
  *     multi-line folded scalar
@@ -68,7 +68,6 @@ function parseFrontmatter(raw: string): { meta: Frontmatter; body: string } {
   const body = match[2]!;
   const meta: Frontmatter = {};
 
-  // State machine for folded scalars (>)
   let currentKey: string | null = null;
   let foldedLines: string[] = [];
 
@@ -82,7 +81,6 @@ function parseFrontmatter(raw: string): { meta: Frontmatter; body: string } {
 
   for (const line of yamlBlock.split(/\r?\n/)) {
     if (currentKey !== null) {
-      // Continuation of a folded scalar — indented line
       if (line.startsWith("  ")) {
         foldedLines.push(line.trim());
         continue;
@@ -105,7 +103,6 @@ function parseFrontmatter(raw: string): { meta: Frontmatter; body: string } {
   }
 
   flushFolded();
-
   return { meta, body: body.trimStart() };
 }
 
@@ -114,7 +111,6 @@ function buildFrontmatter(fields: Record<string, string | undefined>): string {
   const lines: string[] = ["---"];
   for (const [k, v] of Object.entries(fields)) {
     if (v === undefined || v === "") continue;
-    // Use folded scalar for multi-sentence descriptions
     if (v.includes("\n")) {
       lines.push(`${k}: |`);
       for (const l of v.split("\n")) lines.push(`  ${l}`);
@@ -126,16 +122,115 @@ function buildFrontmatter(fields: Record<string, string | undefined>): string {
   return lines.join("\n");
 }
 
+// ─── Entity types ────────────────────────────────────────────────────
+
+export interface AgentEntry {
+  id: string;
+  name: string;
+  description: string;
+  markdownContent: string;
+  tools: string[];
+  model: string | null;
+  tags: string[];
+  source: string;
+  version: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillEntry {
+  id: string;
+  name: string;
+  description: string;
+  skillMdContent: string;
+  hasScripts: boolean;
+  hasTemplates: boolean;
+  tags: string[];
+  source: string;
+  version: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlaybookEntry {
+  id: string;
+  name: string;
+  description: string;
+  permissionProfile: string;
+  permissions: Record<string, string>;
+  agentIds: string[];
+  skillIds: string[];
+  mcpIds: string[];
+  agentsRules: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ─── Agent file I/O ──────────────────────────────────────────────────
 
-type AgentRow = typeof schema.agents.$inferSelect;
+/** Read all agents from data/agents/*.md */
+export function readAllAgents(): AgentEntry[] {
+  ensureDirs();
+  const results: AgentEntry[] = [];
+  for (const file of readdirSync(AGENTS_DIR)) {
+    if (!file.endsWith(".md")) continue;
+    const filePath = join(AGENTS_DIR, file);
+    try {
+      const raw   = readFileSync(filePath, "utf-8");
+      const { meta, body } = parseFrontmatter(raw);
+      const name  = meta["name"] ?? file.replace(/\.md$/, "");
+      const mtime = statSync(filePath).mtime.toISOString();
+      const tools = (meta["tools"] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+      results.push({
+        id:              toSlug(name),
+        name,
+        description:     meta["description"] ?? "",
+        markdownContent: body,
+        tools,
+        model:           meta["model"] ?? null,
+        tags:            [],
+        source:          "file",
+        version:         meta["version"] ?? "1.0.0",
+        createdAt:       mtime,
+        updatedAt:       mtime,
+      });
+    } catch { /* skip malformed files */ }
+  }
+  return results;
+}
+
+/** Read a single agent by slug ID. */
+export function readAgent(id: string): AgentEntry | null {
+  const filePath = join(AGENTS_DIR, `${id}.md`);
+  if (!existsSync(filePath)) return null;
+  try {
+    const raw   = readFileSync(filePath, "utf-8");
+    const { meta, body } = parseFrontmatter(raw);
+    const name  = meta["name"] ?? id;
+    const mtime = statSync(filePath).mtime.toISOString();
+    const tools = (meta["tools"] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+    return {
+      id,
+      name,
+      description:     meta["description"] ?? "",
+      markdownContent: body,
+      tools,
+      model:           meta["model"] ?? null,
+      tags:            [],
+      source:          "file",
+      version:         meta["version"] ?? "1.0.0",
+      createdAt:       mtime,
+      updatedAt:       mtime,
+    };
+  } catch { return null; }
+}
 
 /** Write an agent to data/agents/{slug}.md */
-export function writeAgentFile(agent: AgentRow): void {
+export function writeAgentFile(agent: AgentEntry): void {
   ensureDirs();
-  const slug = toSlug(agent.name);
-  const tools = (JSON.parse(agent.tools) as string[]).join(", ");
-  const fm = buildFrontmatter({
+  const slug  = toSlug(agent.name);
+  const tools = agent.tools.join(", ");
+  const fm    = buildFrontmatter({
     name:        agent.name,
     description: agent.description,
     tools:       tools || undefined,
@@ -145,247 +240,153 @@ export function writeAgentFile(agent: AgentRow): void {
   writeFileSync(join(AGENTS_DIR, `${slug}.md`), content, "utf-8");
 }
 
-/** Delete an agent's markdown file (best-effort). */
-export function deleteAgentFile(name: string): void {
-  const path = join(AGENTS_DIR, `${toSlug(name)}.md`);
+/** Delete an agent's markdown file. */
+export function deleteAgentFile(id: string): void {
+  const path = join(AGENTS_DIR, `${id}.md`);
   if (existsSync(path)) rmSync(path);
 }
 
 // ─── Skill file I/O ──────────────────────────────────────────────────
 
-type SkillRow = typeof schema.skills.$inferSelect;
+/** Read all skills from data/skills/{slug}/SKILL.md */
+export function readAllSkills(): SkillEntry[] {
+  ensureDirs();
+  const results: SkillEntry[] = [];
+  for (const entry of readdirSync(SKILLS_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillMdPath = join(SKILLS_DIR, entry.name, "SKILL.md");
+    if (!existsSync(skillMdPath)) continue;
+    try {
+      const raw   = readFileSync(skillMdPath, "utf-8");
+      const { meta, body } = parseFrontmatter(raw);
+      const name  = meta["name"] ?? entry.name;
+      const mtime = statSync(skillMdPath).mtime.toISOString();
+      results.push({
+        id:             entry.name,
+        name,
+        description:    meta["description"] ?? "",
+        skillMdContent: body,
+        hasScripts:     false,
+        hasTemplates:   false,
+        tags:           [],
+        source:         "file",
+        version:        "1.0.0",
+        createdAt:      mtime,
+        updatedAt:      mtime,
+      });
+    } catch { /* skip */ }
+  }
+  return results;
+}
+
+/** Read a single skill by slug ID. */
+export function readSkill(id: string): SkillEntry | null {
+  const skillMdPath = join(SKILLS_DIR, id, "SKILL.md");
+  if (!existsSync(skillMdPath)) return null;
+  try {
+    const raw   = readFileSync(skillMdPath, "utf-8");
+    const { meta, body } = parseFrontmatter(raw);
+    const name  = meta["name"] ?? id;
+    const mtime = statSync(skillMdPath).mtime.toISOString();
+    return {
+      id,
+      name,
+      description:    meta["description"] ?? "",
+      skillMdContent: body,
+      hasScripts:     false,
+      hasTemplates:   false,
+      tags:           [],
+      source:         "file",
+      version:        "1.0.0",
+      createdAt:      mtime,
+      updatedAt:      mtime,
+    };
+  } catch { return null; }
+}
 
 /** Write a skill to data/skills/{slug}/SKILL.md */
-export function writeSkillFile(skill: SkillRow): void {
+export function writeSkillFile(skill: SkillEntry): void {
   ensureDirs();
   const slug = toSlug(skill.name);
   const dir  = join(SKILLS_DIR, slug);
   mkdirSync(dir, { recursive: true });
-
-  const fm = buildFrontmatter({
-    name:        skill.name,
-    description: skill.description,
-  });
+  const fm      = buildFrontmatter({ name: skill.name, description: skill.description });
   const content = `${fm}\n\n${skill.skillMdContent ?? ""}`.trimEnd() + "\n";
   writeFileSync(join(dir, "SKILL.md"), content, "utf-8");
 }
 
-/** Delete a skill's directory (best-effort). */
-export function deleteSkillFile(name: string): void {
-  const dir = join(SKILLS_DIR, toSlug(name));
+/** Delete a skill's directory. */
+export function deleteSkillFile(id: string): void {
+  const dir = join(SKILLS_DIR, id);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
-}
-
-// ─── Import from filesystem ──────────────────────────────────────────
-
-/**
- * Scan data/agents/ and import any .md file that doesn't already exist
- * in the database (matched by name).
- */
-export async function syncAgentsFromFiles(): Promise<number> {
-  ensureDirs();
-  if (!existsSync(AGENTS_DIR)) return 0;
-
-  const existing = await db.select({ name: schema.agents.name }).from(schema.agents);
-  const knownNames = new Set(existing.map((r) => r.name.toLowerCase()));
-
-  let imported = 0;
-
-  for (const file of readdirSync(AGENTS_DIR)) {
-    if (!file.endsWith(".md")) continue;
-
-    const raw = readFileSync(join(AGENTS_DIR, file), "utf-8");
-    const { meta, body } = parseFrontmatter(raw);
-
-    const name = meta["name"];
-    if (!name) continue;
-    if (knownNames.has(name.toLowerCase())) continue;
-
-    const tools = (meta["tools"] ?? "")
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
-
-    const now = new Date().toISOString();
-    await db.insert(schema.agents).values({
-      id:              crypto.randomUUID(),
-      name,
-      description:     meta["description"] ?? "",
-      markdownContent: body,
-      tools:           JSON.stringify(tools),
-      model:           meta["model"] ?? null,
-      tags:            "[]",
-      source:          "file",
-      version:         "1.0.0",
-      createdAt:       now,
-      updatedAt:       now,
-    });
-
-    knownNames.add(name.toLowerCase());
-    imported++;
-  }
-
-  return imported;
-}
-
-/**
- * Scan data/skills/ and import any SKILL.md that doesn't already exist
- * in the database (matched by name).
- */
-export async function syncSkillsFromFiles(): Promise<number> {
-  ensureDirs();
-  if (!existsSync(SKILLS_DIR)) return 0;
-
-  const existing = await db.select({ name: schema.skills.name }).from(schema.skills);
-  const knownNames = new Set(existing.map((r) => r.name.toLowerCase()));
-
-  let imported = 0;
-
-  for (const entry of readdirSync(SKILLS_DIR, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-
-    const skillMdPath = join(SKILLS_DIR, entry.name, "SKILL.md");
-    if (!existsSync(skillMdPath)) continue;
-
-    const raw = readFileSync(skillMdPath, "utf-8");
-    const { meta, body } = parseFrontmatter(raw);
-
-    const name = meta["name"];
-    if (!name) continue;
-    if (knownNames.has(name.toLowerCase())) continue;
-
-    const now = new Date().toISOString();
-    await db.insert(schema.skills).values({
-      id:             crypto.randomUUID(),
-      name,
-      description:    meta["description"] ?? "",
-      skillMdContent: body,
-      tags:           "[]",
-      source:         "file",
-      version:        "1.0.0",
-      createdAt:      now,
-      updatedAt:      now,
-    });
-
-    knownNames.add(name.toLowerCase());
-    imported++;
-  }
-
-  return imported;
 }
 
 // ─── Playbook file I/O ───────────────────────────────────────────────
 
-type PlaybookRow = typeof schema.playbooks.$inferSelect;
+/** Read all playbooks from data/playbooks/*.md */
+export function readAllPlaybooks(): PlaybookEntry[] {
+  ensureDirs();
+  const results: PlaybookEntry[] = [];
+  for (const file of readdirSync(PLAYBOOKS_DIR)) {
+    if (!file.endsWith(".md")) continue;
+    const filePath = join(PLAYBOOKS_DIR, file);
+    try {
+      const raw   = readFileSync(filePath, "utf-8");
+      const { meta, body } = parseFrontmatter(raw);
+      const name  = meta["name"] ?? file.replace(/\.md$/, "");
+      const mtime = statSync(filePath).mtime.toISOString();
+
+      const permissionProfile = meta["permission_profile"] ?? "autonomous";
+      const permissions = PERMISSION_PRESETS[permissionProfile] ?? PERMISSION_PRESETS["autonomous"]!;
+
+      // Agent/skill references are stored as names; resolve to slugs (= IDs)
+      const agentIds = (meta["agents"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).map(toSlug);
+      const skillIds = (meta["skills"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).map(toSlug);
+
+      results.push({
+        id:                file.replace(/\.md$/, ""),
+        name,
+        description:       meta["description"] ?? "",
+        permissionProfile,
+        permissions,
+        agentIds,
+        skillIds,
+        mcpIds:            [],
+        agentsRules:       body.trim(),
+        createdAt:         mtime,
+        updatedAt:         mtime,
+      });
+    } catch { /* skip malformed files */ }
+  }
+  return results;
+}
+
+/** Read a single playbook by slug ID (filename stem). */
+export function readPlaybook(id: string): PlaybookEntry | null {
+  return readAllPlaybooks().find((p) => p.id === id) ?? null;
+}
 
 /** Write a playbook to data/playbooks/{slug}.md */
-export function writePlaybookFile(playbook: PlaybookRow): void {
+export function writePlaybookFile(playbook: PlaybookEntry): void {
   ensureDirs();
-  const slug    = toSlug(playbook.name);
-  const agentIds: string[] = JSON.parse(playbook.agentIds);
-  const skillIds: string[] = JSON.parse(playbook.skillIds);
-
-  // We store names only if we can look them up — for now store IDs as-is
-  const fm = buildFrontmatter({
+  const slug = toSlug(playbook.name);
+  const fm   = buildFrontmatter({
     name:               playbook.name,
     description:        playbook.description || undefined,
     permission_profile: playbook.permissionProfile,
   });
   const body = [
-    agentIds.length  ? `agents: ${agentIds.join(", ")}` : null,
-    skillIds.length  ? `skills: ${skillIds.join(", ")}` : null,
-    playbook.agentsRules ? `\n${playbook.agentsRules}` : null,
+    playbook.agentIds.length ? `agents: ${playbook.agentIds.join(", ")}` : null,
+    playbook.skillIds.length ? `skills: ${playbook.skillIds.join(", ")}` : null,
+    playbook.agentsRules     ? `\n${playbook.agentsRules}` : null,
   ].filter(Boolean).join("\n");
 
   const content = `${fm}\n\n${body}`.trimEnd() + "\n";
   writeFileSync(join(PLAYBOOKS_DIR, `${slug}.md`), content, "utf-8");
 }
 
-/** Delete a playbook's markdown file (best-effort). */
-export function deletePlaybookFile(name: string): void {
-  const path = join(PLAYBOOKS_DIR, `${toSlug(name)}.md`);
+/** Delete a playbook's markdown file. */
+export function deletePlaybookFile(id: string): void {
+  const path = join(PLAYBOOKS_DIR, `${id}.md`);
   if (existsSync(path)) rmSync(path);
-}
-
-/**
- * Scan data/playbooks/ and import any .md that doesn't already exist in DB.
- * Agent/skill names in frontmatter are resolved to IDs by name lookup.
- */
-export async function syncPlaybooksFromFiles(): Promise<number> {
-  ensureDirs();
-  if (!existsSync(PLAYBOOKS_DIR)) return 0;
-
-  const existing = await db.select({ name: schema.playbooks.name }).from(schema.playbooks);
-  const knownNames = new Set(existing.map((r) => r.name.toLowerCase()));
-
-  // Pre-load all agents and skills for name → id resolution
-  const allAgents = await db.select({ id: schema.agents.id, name: schema.agents.name }).from(schema.agents);
-  const allSkills = await db.select({ id: schema.skills.id, name: schema.skills.name }).from(schema.skills);
-  const agentByName = new Map(allAgents.map((a) => [a.name.toLowerCase(), a.id]));
-  const skillByName = new Map(allSkills.map((s) => [s.name.toLowerCase(), s.id]));
-
-  let imported = 0;
-
-  for (const file of readdirSync(PLAYBOOKS_DIR)) {
-    if (!file.endsWith(".md")) continue;
-
-    const raw = readFileSync(join(PLAYBOOKS_DIR, file), "utf-8");
-    const { meta, body } = parseFrontmatter(raw);
-
-    const name = meta["name"];
-    if (!name) continue;
-    if (knownNames.has(name.toLowerCase())) continue;
-
-    const permissionProfile =
-      (meta["permission_profile"] ?? "autonomous") as "autonomous" | "assisted" | "restrictive";
-
-    // Resolve agent names → IDs
-    const agentNames = (meta["agents"] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    const agentIds   = agentNames.map((n) => agentByName.get(n.toLowerCase())).filter((id): id is string => !!id);
-
-    // Resolve skill names → IDs
-    const skillNames = (meta["skills"] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    const skillIds   = skillNames.map((n) => skillByName.get(n.toLowerCase())).filter((id): id is string => !!id);
-
-    const permissions = PERMISSION_PRESETS[permissionProfile] ?? PERMISSION_PRESETS["autonomous"]!;
-    const now = new Date().toISOString();
-
-    await db.insert(schema.playbooks).values({
-      id:                crypto.randomUUID(),
-      name,
-      description:       meta["description"] ?? "",
-      permissionProfile,
-      permissions:       JSON.stringify(permissions),
-      agentIds:          JSON.stringify(agentIds),
-      skillIds:          JSON.stringify(skillIds),
-      mcpIds:            "[]",
-      agentsRules:       body.trim(),
-      createdAt:         now,
-      updatedAt:         now,
-    });
-
-    knownNames.add(name.toLowerCase());
-    imported++;
-  }
-
-  return imported;
-}
-
-// ─── Startup sync ────────────────────────────────────────────────────
-
-/**
- * Run all sync operations at startup.
- * Logs results to stdout; never throws.
- */
-export async function startupSync(): Promise<void> {
-  try {
-    const agents    = await syncAgentsFromFiles();
-    const skills    = await syncSkillsFromFiles();
-    const playbooks = await syncPlaybooksFromFiles();
-    if (agents > 0 || skills > 0 || playbooks > 0) {
-      console.log(`📂 Synced from files: ${agents} agent(s), ${skills} skill(s), ${playbooks} playbook(s)`);
-    }
-  } catch (err) {
-    console.warn("⚠️  File sync failed:", err);
-  }
 }

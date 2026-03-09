@@ -1,43 +1,34 @@
 import { Hono } from "hono";
-import { eq, desc } from "drizzle-orm";
-import { db } from "../db/index.js";
-import { playbooks } from "../db/schema.js";
 import { NotFoundError } from "../lib/errors.js";
-import { deletePlaybookFile, syncPlaybooksFromFiles } from "../services/markdown-sync.js";
+import {
+  readAllPlaybooks,
+  readPlaybook,
+  deletePlaybookFile,
+} from "../services/markdown-sync.js";
 import { importFromZip, importFromGitHubUrl } from "../services/importer.js";
 
 export const playbooksRouter = new Hono();
 
 /** GET /api/v1/playbooks */
-playbooksRouter.get("/", async (ctx) => {
-  const rows = await db.select().from(playbooks).orderBy(desc(playbooks.createdAt));
-  return ctx.json({ data: rows.map(deserialize) });
+playbooksRouter.get("/", (ctx) => {
+  return ctx.json({ data: readAllPlaybooks() });
 });
 
 /** GET /api/v1/playbooks/:id */
-playbooksRouter.get("/:id", async (ctx) => {
-  const id = ctx.req.param("id");
-  const row = await db.select().from(playbooks).where(eq(playbooks.id, id)).get();
+playbooksRouter.get("/:id", (ctx) => {
+  const id  = ctx.req.param("id");
+  const row = readPlaybook(id);
   if (!row) throw new NotFoundError("Playbook", id);
-  return ctx.json({ data: deserialize(row) });
+  return ctx.json({ data: row });
 });
 
 /** DELETE /api/v1/playbooks/:id */
-playbooksRouter.delete("/:id", async (ctx) => {
-  const id = ctx.req.param("id");
-  const existing = await db.select().from(playbooks).where(eq(playbooks.id, id)).get();
-  if (!existing) throw new NotFoundError("Playbook", id);
-
-  await db.delete(playbooks).where(eq(playbooks.id, id));
-  deletePlaybookFile(existing.name);
-
+playbooksRouter.delete("/:id", (ctx) => {
+  const id  = ctx.req.param("id");
+  const row = readPlaybook(id);
+  if (!row) throw new NotFoundError("Playbook", id);
+  deletePlaybookFile(id);
   return ctx.json({ data: { deleted: true } });
-});
-
-/** POST /api/v1/playbooks/sync — re-scan data/playbooks/ and import new files */
-playbooksRouter.post("/sync", async (ctx) => {
-  const imported = await syncPlaybooksFromFiles();
-  return ctx.json({ data: { imported } });
 });
 
 /**
@@ -50,8 +41,8 @@ playbooksRouter.post("/sync", async (ctx) => {
  *   name: my-playbook
  *   description: Optional description
  *   permission_profile: autonomous | assisted | restrictive
- *   agents: agent-name-1, agent-name-2
- *   skills: skill-name-1
+ *   agents: agent-slug-1, agent-slug-2
+ *   skills: skill-slug-1
  *   ---
  *   # Work sequence
  *   1. …
@@ -73,13 +64,3 @@ playbooksRouter.post("/import", async (ctx) => {
 
   return ctx.json({ data: { imported } });
 });
-
-function deserialize(row: typeof playbooks.$inferSelect) {
-  return {
-    ...row,
-    permissions: JSON.parse(row.permissions) as Record<string, string>,
-    agentIds:    JSON.parse(row.agentIds) as string[],
-    skillIds:    JSON.parse(row.skillIds) as string[],
-    mcpIds:      JSON.parse(row.mcpIds)   as string[],
-  };
-}

@@ -1,11 +1,13 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
-import { eq, sql } from "drizzle-orm";
-import { db, schema } from "../db/index.js";
-import { NotFoundError } from "../lib/errors.js";
-import { deleteAgentFile, syncAgentsFromFiles } from "../services/markdown-sync.js";
-import { importFromZip, importFromGitHubUrl } from "../services/importer.js";
 import { z } from "zod";
+import { NotFoundError } from "../lib/errors.js";
+import {
+  readAllAgents,
+  readAgent,
+  deleteAgentFile,
+} from "../services/markdown-sync.js";
+import { importFromZip, importFromGitHubUrl } from "../services/importer.js";
 
 export const agentsRouter = new Hono();
 
@@ -15,47 +17,29 @@ const listQuery = z.object({
 });
 
 /** GET /api/v1/agents */
-agentsRouter.get("/", zValidator("query", listQuery), async (ctx) => {
+agentsRouter.get("/", zValidator("query", listQuery), (ctx) => {
   const { page, pageSize } = ctx.req.valid("query");
+  const all    = readAllAgents();
   const offset = (page - 1) * pageSize;
-
-  const items = await db
-    .select()
-    .from(schema.agents)
-    .limit(pageSize)
-    .offset(offset);
-
-  const [{ total }] = await db
-    .select({ total: sql<number>`count(*)` })
-    .from(schema.agents);
-
-  return ctx.json({ data: items.map(deserialize), total, page, pageSize });
+  const items  = all.slice(offset, offset + pageSize);
+  return ctx.json({ data: items, total: all.length, page, pageSize });
 });
 
 /** GET /api/v1/agents/:id */
-agentsRouter.get("/:id", async (ctx) => {
-  const id = ctx.req.param("id");
-  const [row] = await db.select().from(schema.agents).where(eq(schema.agents.id, id));
+agentsRouter.get("/:id", (ctx) => {
+  const id  = ctx.req.param("id");
+  const row = readAgent(id);
   if (!row) throw new NotFoundError("Agent", id);
-  return ctx.json({ data: deserialize(row) });
+  return ctx.json({ data: row });
 });
 
 /** DELETE /api/v1/agents/:id */
-agentsRouter.delete("/:id", async (ctx) => {
-  const id = ctx.req.param("id");
-  const [existing] = await db.select().from(schema.agents).where(eq(schema.agents.id, id));
-  if (!existing) throw new NotFoundError("Agent", id);
-
-  await db.delete(schema.agents).where(eq(schema.agents.id, id));
-  deleteAgentFile(existing.name);
-
+agentsRouter.delete("/:id", (ctx) => {
+  const id  = ctx.req.param("id");
+  const row = readAgent(id);
+  if (!row) throw new NotFoundError("Agent", id);
+  deleteAgentFile(id);
   return ctx.json({ data: { deleted: true } });
-});
-
-/** POST /api/v1/agents/sync — re-scan data/agents/ and import new files */
-agentsRouter.post("/sync", async (ctx) => {
-  const imported = await syncAgentsFromFiles();
-  return ctx.json({ data: { imported } });
 });
 
 /**
@@ -80,11 +64,3 @@ agentsRouter.post("/import", async (ctx) => {
 
   return ctx.json({ data: { imported } });
 });
-
-function deserialize(row: typeof schema.agents.$inferSelect) {
-  return {
-    ...row,
-    tools: JSON.parse(row.tools) as string[],
-    tags:  JSON.parse(row.tags)  as string[],
-  };
-}

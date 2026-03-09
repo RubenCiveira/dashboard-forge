@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { db } from "../db/index.js";
-import { skills } from "../db/schema.js";
 import { NotFoundError } from "../lib/errors.js";
-import { eq, sql, desc } from "drizzle-orm";
-import { deleteSkillFile, syncSkillsFromFiles } from "../services/markdown-sync.js";
+import {
+  readAllSkills,
+  readSkill,
+  deleteSkillFile,
+} from "../services/markdown-sync.js";
 import { importFromZip, importFromGitHubUrl } from "../services/importer.js";
 
 export const skillsRouter = new Hono();
@@ -16,40 +17,29 @@ const listQuery = z.object({
 });
 
 /** GET /api/v1/skills */
-skillsRouter.get("/", zValidator("query", listQuery), async (ctx) => {
+skillsRouter.get("/", zValidator("query", listQuery), (ctx) => {
   const { page, pageSize } = ctx.req.valid("query");
+  const all    = readAllSkills();
   const offset = (page - 1) * pageSize;
-
-  const items = await db.select().from(skills).orderBy(desc(skills.createdAt)).limit(pageSize).offset(offset);
-  const [{ total }] = await db.select({ total: sql<number>`count(*)` }).from(skills);
-
-  return ctx.json({ data: items.map(deserialize), total, page, pageSize });
+  const items  = all.slice(offset, offset + pageSize);
+  return ctx.json({ data: items, total: all.length, page, pageSize });
 });
 
 /** GET /api/v1/skills/:id */
-skillsRouter.get("/:id", async (ctx) => {
-  const id = ctx.req.param("id");
-  const row = await db.select().from(skills).where(eq(skills.id, id)).get();
+skillsRouter.get("/:id", (ctx) => {
+  const id  = ctx.req.param("id");
+  const row = readSkill(id);
   if (!row) throw new NotFoundError("Skill", id);
-  return ctx.json({ data: deserialize(row) });
+  return ctx.json({ data: row });
 });
 
 /** DELETE /api/v1/skills/:id */
-skillsRouter.delete("/:id", async (ctx) => {
-  const id = ctx.req.param("id");
-  const existing = await db.select().from(skills).where(eq(skills.id, id)).get();
-  if (!existing) throw new NotFoundError("Skill", id);
-
-  await db.delete(skills).where(eq(skills.id, id));
-  deleteSkillFile(existing.name);
-
+skillsRouter.delete("/:id", (ctx) => {
+  const id  = ctx.req.param("id");
+  const row = readSkill(id);
+  if (!row) throw new NotFoundError("Skill", id);
+  deleteSkillFile(id);
   return ctx.json({ data: { deleted: true } });
-});
-
-/** POST /api/v1/skills/sync — re-scan data/skills/ and import new files */
-skillsRouter.post("/sync", async (ctx) => {
-  const imported = await syncSkillsFromFiles();
-  return ctx.json({ data: { imported } });
 });
 
 /**
@@ -74,7 +64,3 @@ skillsRouter.post("/import", async (ctx) => {
 
   return ctx.json({ data: { imported } });
 });
-
-function deserialize(row: typeof skills.$inferSelect) {
-  return { ...row, tags: JSON.parse(row.tags) as string[] };
-}

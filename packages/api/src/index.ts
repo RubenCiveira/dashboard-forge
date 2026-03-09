@@ -12,7 +12,6 @@ import { playbooksRouter } from "./routes/playbooks.js";
 import { runnersRouter } from "./routes/runners.js";
 import { ApiError } from "./lib/errors.js";
 import { DEFAULT_API_PORT } from "@agentforge/shared";
-import { startupSync } from "./services/markdown-sync.js";
 import { db, sqlite } from "./db/index.js";
 import { runners } from "./db/schema.js";
 import { randomUUID } from "crypto";
@@ -82,9 +81,6 @@ sqlite.run(`
   )
 `);
 console.log("✓ Migrations applied");
-
-// Run file sync before accepting requests
-await startupSync();
 
 // Seed default OpenCode runner if none exists
 const existingRunners = await db.select().from(runners).all();

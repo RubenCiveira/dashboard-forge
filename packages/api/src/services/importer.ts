@@ -1,6 +1,6 @@
 /**
  * Importer service — brings agent/skill/playbook files into the data directory
- * from a ZIP archive or a GitHub URL, then triggers file-system sync to DB.
+ * from a ZIP archive or a GitHub URL.
  *
  * Supported GitHub URL forms:
  *   blob  → https://github.com/user/repo/blob/main/agents/code-reviewer.md
@@ -9,32 +9,29 @@
 
 import { unzipSync } from "fflate";
 import { mkdirSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
-import {
-  syncAgentsFromFiles,
-  syncSkillsFromFiles,
-  syncPlaybooksFromFiles,
-} from "./markdown-sync.js";
+import { join } from "path";
+import { DATA_DIR } from "./markdown-sync.js";
 
 export type ImportType = "agents" | "skills" | "playbooks";
-
-const DATA_DIR = resolve(process.cwd(), "data");
 
 // ─── ZIP import ──────────────────────────────────────────────────────
 
 /**
- * Extract relevant files from a ZIP buffer into data/{type}/, then sync to DB.
+ * Extract relevant files from a ZIP buffer into data/{type}/.
  * - agents/playbooks: any *.md file (except SKILL.md)
  * - skills: {slug}/SKILL.md files, using the parent directory name as slug
+ * Returns the number of files written.
  */
 export async function importFromZip(
   buffer: ArrayBuffer,
   type: ImportType,
 ): Promise<number> {
-  const uint8  = new Uint8Array(buffer);
-  const files  = unzipSync(uint8);
+  const uint8   = new Uint8Array(buffer);
+  const files   = unzipSync(uint8);
   const destDir = join(DATA_DIR, type);
   mkdirSync(destDir, { recursive: true });
+
+  let written = 0;
 
   for (const [path, data] of Object.entries(files)) {
     const parts = path.split("/");
@@ -43,6 +40,7 @@ export async function importFromZip(
     if (type === "agents" || type === "playbooks") {
       if (!name.endsWith(".md") || name === "SKILL.md") continue;
       writeFileSync(join(destDir, name), data);
+      written++;
     } else {
       // skills: look for SKILL.md files, use parent dir as slug
       if (name !== "SKILL.md") continue;
@@ -51,10 +49,11 @@ export async function importFromZip(
       const skillDir = join(destDir, slug);
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(join(skillDir, "SKILL.md"), data);
+      written++;
     }
   }
 
-  return runSync(type);
+  return written;
 }
 
 // ─── GitHub import ───────────────────────────────────────────────────
@@ -112,7 +111,7 @@ async function listDir(
 
 /**
  * Import from a GitHub blob (single file) or tree (directory) URL.
- * Writes files to data/{type}/ and syncs to DB.
+ * Writes files to data/{type}/ and returns the number of files written.
  */
 export async function importFromGitHubUrl(
   url: string,
@@ -129,14 +128,14 @@ export async function importFromGitHubUrl(
   const destDir = join(DATA_DIR, type);
   mkdirSync(destDir, { recursive: true });
 
+  let written = 0;
+
   if (!isDir) {
-    // Single file
     const content = await fetchText(rawUrl(owner, repo, ref, path));
     const name    = path.split("/").pop()!;
 
     if (type === "skills") {
-      // Treat it as a SKILL.md; use filename stem as slug
-      const slug = name.replace(/\.md$/i, "");
+      const slug     = name.replace(/\.md$/i, "");
       const skillDir = join(destDir, slug);
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(join(skillDir, "SKILL.md"), content);
@@ -144,12 +143,11 @@ export async function importFromGitHubUrl(
       if (!name.endsWith(".md")) throw new Error("File must end in .md");
       writeFileSync(join(destDir, name), content);
     }
+    written = 1;
   } else {
-    // Directory listing
     const entries = await listDir(owner, repo, path, ref);
 
     if (type === "agents" || type === "playbooks") {
-      // Download every .md file in this directory level
       const mdFiles = entries.filter(
         (e) => e.type === "file" && e.name.endsWith(".md") && e.name !== "SKILL.md",
       );
@@ -158,17 +156,18 @@ export async function importFromGitHubUrl(
           rawUrl(owner, repo, ref, path ? `${path}/${file.name}` : file.name),
         );
         writeFileSync(join(destDir, file.name), content);
+        written++;
       }
     } else {
-      // Skills: each subdirectory is a skill; fetch SKILL.md from each
       const dirs = entries.filter((e) => e.type === "dir");
       for (const dir of dirs) {
         const skillMdPath = path ? `${path}/${dir.name}/SKILL.md` : `${dir.name}/SKILL.md`;
         try {
-          const content = await fetchText(rawUrl(owner, repo, ref, skillMdPath));
+          const content  = await fetchText(rawUrl(owner, repo, ref, skillMdPath));
           const skillDir = join(destDir, dir.name);
           mkdirSync(skillDir, { recursive: true });
           writeFileSync(join(skillDir, "SKILL.md"), content);
+          written++;
         } catch {
           // no SKILL.md in this subdir — skip silently
         }
@@ -176,13 +175,5 @@ export async function importFromGitHubUrl(
     }
   }
 
-  return runSync(type);
-}
-
-// ─── helpers ─────────────────────────────────────────────────────────
-
-function runSync(type: ImportType): Promise<number> {
-  if (type === "agents")    return syncAgentsFromFiles();
-  if (type === "skills")    return syncSkillsFromFiles();
-  return syncPlaybooksFromFiles();
+  return written;
 }
