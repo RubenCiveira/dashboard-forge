@@ -23,7 +23,17 @@
       "Bash(curl -s -X POST http://localhost:4080/api/v1/skills/sync)",
       "Bash(curl -s -X POST http://localhost:4080/api/v1/playbooks/sync)",
       "Bash(curl -s http://localhost:4080/api/v1/skills)",
-      "Bash(curl -s http://localhost:4080/api/v1/playbooks)"
+      "Bash(curl -s http://localhost:4080/api/v1/playbooks)",
+      "Bash(curl -s -X POST 'http://localhost:4080/api/v1/jobs' -H 'Content-Type: application/json' -d '{\"\"prompt\"\":\"\"crea docblock y test unitarios para AqDumpingControlApplication\"\",\"\"projectId\"\":\"\"60a044ac-1712-444e-8a1b-4e0e234b2fb5\"\",\"\"playbookId\"\":\"\"refactor-and-document\"\"}')",
+      "Bash(curl -s 'http://localhost:4080/api/v1/projects/60a044ac-1712-444e-8a1b-4e0e234b2fb5')",
+      "Bash(grep -A30 \"CREATE TABLE \\\\`jobs\\\\`\" /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/packages/api/drizzle/0000_chubby_marvel_apes.sql)",
+      "Bash(grep -A10 \"CREATE TABLE \\\\`auto_rules\\\\`\" /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/packages/api/drizzle/0000_chubby_marvel_apes.sql)",
+      "Bash(curl -s http://localhost:4080/api/health)",
+      "Bash(curl -s 'http://localhost:4080/api/v1/jobs/145f6cf0-7ac0-4005-ab88-73f9a21d2a08')",
+      "Bash(curl -s -X POST 'http://localhost:4080/api/v1/jobs' -H 'Content-Type: application/json' -d '{\"\"prompt\"\":\"\"lista los ficheros del proyecto\"\",\"\"projectId\"\":\"\"60a044ac-1712-444e-8a1b-4e0e234b2fb5\"\",\"\"playbookId\"\":\"\"refactor-and-document\"\"}')",
+      "Bash(curl -s 'http://localhost:4080/api/v1/jobs/793dec74-f35b-4a24-be86-cb3e44cabafb')",
+      "Bash(curl -s -X POST 'http://localhost:4080/api/v1/jobs' -H 'Content-Type: application/json' -d '{\"\"prompt\"\":\"\"lista los ficheros raiz del proyecto\"\",\"\"projectId\"\":\"\"60a044ac-1712-444e-8a1b-4e0e234b2fb5\"\",\"\"playbookId\"\":\"\"refactor-and-document\"\"}')",
+      "Bash(curl -s 'http://localhost:4080/api/v1/jobs/49d57344-58e9-43cb-b279-2a95de7bd1b1')"
     ]
   }
 }

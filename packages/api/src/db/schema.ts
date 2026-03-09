@@ -83,7 +83,7 @@ export const jobs = sqliteTable("jobs", {
   id: text("id").primaryKey(),
   prompt: text("prompt").notNull(),
   projectId: text("project_id").notNull().references(() => projects.id),
-  playbookId: text("playbook_id").references(() => playbooks.id),
+  playbookId: text("playbook_id"),
   agentId: text("agent_id"),
   agentOverride: text("agent_override"),
   modelOverride: text("model_override"),
@@ -91,6 +91,7 @@ export const jobs = sqliteTable("jobs", {
   parentJobId: text("parent_job_id"),
   contextFrom: text("context_from"),
   sessionId: text("session_id"),
+  pid: integer("pid"),
   summary: text("summary"),
   cost: text("cost"),
   startedAt: text("started_at"),
@@ -112,7 +113,7 @@ export const jobEvents = sqliteTable("job_events", {
 
 export const autoRules = sqliteTable("auto_rules", {
   id: text("id").primaryKey(),
-  playbookId: text("playbook_id").notNull().references(() => playbooks.id),
+  playbookId: text("playbook_id").notNull(),
   pattern: text("pattern").notNull(),
   action: text("action").notNull(),
   description: text("description").notNull().default(""),

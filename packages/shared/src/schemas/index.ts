@@ -131,7 +131,7 @@ export const projectSchema = z.object({
   branch: z.string().nullable().default(null),
   defaultModel: z.string().default("ollama/qwen3:8b-16k"),
   envVars: z.record(z.string()).default({}),
-  playbookIds: z.array(z.string().uuid()).default([]),
+  playbookIds: z.array(z.string().min(1)).default([]),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
@@ -165,7 +165,7 @@ export const jobSchema = z.object({
   id: z.string().uuid(),
   prompt: z.string().min(1),
   projectId: z.string().uuid(),
-  playbookId: z.string().uuid(),
+  playbookId: z.string().min(1),
   agentOverride: z.string().nullable().default(null),
   modelOverride: z.string().nullable().default(null),
   status: jobStatusSchema,
@@ -182,7 +182,7 @@ export const jobSchema = z.object({
 export const createJobSchema = z.object({
   prompt: z.string().min(1),
   projectId: z.string().uuid(),
-  playbookId: z.string().uuid(),
+  playbookId: z.string().min(1),
   agentOverride: z.string().nullable().optional(),
   modelOverride: z.string().nullable().optional(),
   parentJobId: z.string().uuid().nullable().optional(),
@@ -208,7 +208,7 @@ export const jobEventSchema = z.object({
 
 export const autoRuleSchema = z.object({
   id: z.string().uuid(),
-  playbookId: z.string().uuid(),
+  playbookId: z.string().min(1),
   pattern: z.string().min(1),
   action: z.enum([PERMISSION_ACTION.ALLOW, PERMISSION_ACTION.DENY]),
   description: z.string().default(""),

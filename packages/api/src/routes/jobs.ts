@@ -13,7 +13,7 @@ export const jobsRouter = new Hono();
 const createJobBody = z.object({
   prompt: z.string().min(1),
   projectId: z.string().uuid(),
-  playbookId: z.string().uuid(),
+  playbookId: z.string().min(1),
 });
 
 const listQuerySchema = z.object({

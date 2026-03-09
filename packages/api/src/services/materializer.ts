@@ -3,7 +3,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { db, schema } from "../db/index.js";
 import { eq } from "drizzle-orm";
-import type { PermissionConfig } from "@agentforge/shared";
+import { readPlaybook, readAgent, readSkill } from "./markdown-sync.js";
 
 /**
  * Materializes a playbook into a temporary directory structure
@@ -21,18 +21,8 @@ export async function materializePlaybook(
   jobId: string,
   modelOverride?: string | null,
 ): Promise<string> {
-  // Fetch playbook
-  const [playbook] = await db
-    .select()
-    .from(schema.playbooks)
-    .where(eq(schema.playbooks.id, playbookId));
-
-  if (!playbook) throw new Error(`Playbook ${playbookId} not found`);
-
-  const agentIds: string[] = JSON.parse(playbook.agentIds);
-  const skillIds: string[] = JSON.parse(playbook.skillIds);
-  const mcpIds: string[] = JSON.parse(playbook.mcpIds);
-  const permissions: PermissionConfig = JSON.parse(playbook.permissions);
+  const playbook = readPlaybook(playbookId);
+  if (!playbook) throw new Error(`Playbook "${playbookId}" not found`);
 
   // Create temp directory
   const baseDir = join(tmpdir(), `agentforge-${jobId}`);
@@ -40,13 +30,9 @@ export async function materializePlaybook(
   mkdirSync(join(baseDir, "agents"), { recursive: true });
   mkdirSync(join(baseDir, "skills"), { recursive: true });
 
-  // Fetch and write agents
-  for (const agentId of agentIds) {
-    const [agent] = await db
-      .select()
-      .from(schema.agents)
-      .where(eq(schema.agents.id, agentId));
-
+  // Write agent files
+  for (const agentId of playbook.agentIds) {
+    const agent = readAgent(agentId);
     if (agent) {
       writeFileSync(
         join(baseDir, "agents", `${agent.name}.md`),
@@ -56,52 +42,41 @@ export async function materializePlaybook(
     }
   }
 
-  // Fetch and write skills
-  for (const skillId of skillIds) {
-    const [skill] = await db
-      .select()
-      .from(schema.skills)
-      .where(eq(schema.skills.id, skillId));
-
+  // Write skill directories
+  for (const skillId of playbook.skillIds) {
+    const skill = readSkill(skillId);
     if (skill) {
-      const skillDir = join(baseDir, "skills", skill.name);
+      const skillDir = join(baseDir, "skills", skill.id);
       mkdirSync(skillDir, { recursive: true });
-      writeFileSync(
-        join(skillDir, "SKILL.md"),
-        skill.skillMdContent,
-        "utf-8",
-      );
+      writeFileSync(join(skillDir, "SKILL.md"), skill.skillMdContent, "utf-8");
     }
   }
 
   // Build opencode.json
+  const { permissions } = playbook;
   const opencodeConfig: Record<string, unknown> = {
     $schema: "https://opencode.ai/config.json",
     permission: {
-      bash: permissions.bash,
-      edit: permissions.edit,
-      write: permissions.write,
-      webfetch: permissions.webfetch,
+      bash:               permissions.bash,
+      edit:               permissions.edit,
+      write:              permissions.write,
+      webfetch:           permissions.webfetch,
       external_directory: permissions.externalDirectory,
     },
   };
 
-  // Add MCP servers
-  if (mcpIds.length > 0) {
+  // Add MCP servers (still DB-backed)
+  if (playbook.mcpIds.length > 0) {
     const mcpConfig: Record<string, unknown> = {};
-    for (const mcpId of mcpIds) {
-      const [mcp] = await db
+    for (const mcpId of playbook.mcpIds) {
+      const mcp = await db
         .select()
         .from(schema.mcps)
-        .where(eq(schema.mcps.id, mcpId));
+        .where(eq(schema.mcps.id, mcpId))
+        .get();
 
-      if (mcp && mcp.enabled) {
-        const config = JSON.parse(mcp.config);
-        mcpConfig[mcp.name] = {
-          type: mcp.type,
-          ...config,
-          enabled: true,
-        };
+      if (mcp?.enabled) {
+        mcpConfig[mcp.name] = { type: mcp.type, ...JSON.parse(mcp.config), enabled: true };
       }
     }
     if (Object.keys(mcpConfig).length > 0) {
@@ -115,13 +90,9 @@ export async function materializePlaybook(
     "utf-8",
   );
 
-  // Write AGENTS.md
+  // Write AGENTS.md (work sequence / rules)
   if (playbook.agentsRules) {
-    writeFileSync(
-      join(baseDir, "AGENTS.md"),
-      playbook.agentsRules,
-      "utf-8",
-    );
+    writeFileSync(join(baseDir, "AGENTS.md"), playbook.agentsRules, "utf-8");
   }
 
   return baseDir;

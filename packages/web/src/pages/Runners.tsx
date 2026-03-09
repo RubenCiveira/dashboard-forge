@@ -6,6 +6,7 @@ import type { Model, InstanceConfig } from "@agentforge/shared";
 interface RunnerConfig {
   binaryPath?: string;
   defaultModel?: string;
+  maxConcurrent?: number;
   [key: string]: unknown;
 }
 
@@ -270,6 +271,7 @@ function OpenCodeRunnerCard(props: {
 
   const [binaryPath, setBinaryPath] = createSignal(cfg().binaryPath ?? "opencode");
   const [defaultModel, setDefaultModel] = createSignal(cfg().defaultModel ?? "");
+  const [maxConcurrent, setMaxConcurrent] = createSignal(cfg().maxConcurrent ?? 1);
   const [enabled, setEnabled] = createSignal(props.runner.enabled);
   const [saving, setSaving] = createSignal(false);
   const [checking, setChecking] = createSignal(false);
@@ -305,7 +307,7 @@ function OpenCodeRunnerCard(props: {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         enabled: enabled(),
-        config: { binaryPath: binaryPath().trim() || "opencode", defaultModel: defaultModel().trim() },
+        config: { binaryPath: binaryPath().trim() || "opencode", defaultModel: defaultModel().trim(), maxConcurrent: maxConcurrent() },
       }),
     });
     setSaving(false);
@@ -318,7 +320,7 @@ function OpenCodeRunnerCard(props: {
     await fetch(`/api/v1/runners/${props.runner.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: { binaryPath: binaryPath().trim() || "opencode", defaultModel: defaultModel().trim() } }),
+      body: JSON.stringify({ config: { binaryPath: binaryPath().trim() || "opencode", defaultModel: defaultModel().trim(), maxConcurrent: maxConcurrent() } }),
     });
     const res = await fetch(`/api/v1/runners/${props.runner.id}/check`, { method: "POST" });
     const json = await res.json() as { data: { status: string; version: string | null } };
@@ -437,6 +439,22 @@ function OpenCodeRunnerCard(props: {
             />
             <p class="text-xs text-gray-600 mt-1">
               Override the model for all sessions launched through this runner. Leave empty to use each agent's own model.
+            </p>
+          </div>
+
+          {/* Parallel jobs */}
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">Parallel jobs (buffer)</label>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              class={inp}
+              value={maxConcurrent()}
+              onInput={(e) => setMaxConcurrent(Math.max(1, Math.min(10, Number(e.currentTarget.value) || 1)))}
+            />
+            <p class="text-xs text-gray-600 mt-1">
+              Maximum number of jobs that can run concurrently through this runner.
             </p>
           </div>
 

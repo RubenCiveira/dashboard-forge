@@ -11,6 +11,7 @@ import { skillsRouter } from "./routes/skills.js";
 import { playbooksRouter } from "./routes/playbooks.js";
 import { runnersRouter } from "./routes/runners.js";
 import { ApiError } from "./lib/errors.js";
+import { startDispatcher } from "./services/job-dispatcher.js";
 import { DEFAULT_API_PORT } from "@agentforge/shared";
 import { db, sqlite } from "./db/index.js";
 import { runners } from "./db/schema.js";
@@ -80,6 +81,36 @@ sqlite.run(`
     updated_at TEXT NOT NULL
   )
 `);
+
+// Drop FK on jobs.playbook_id — playbooks are now file-backed, not DB rows.
+// SQLite requires recreating the table to drop a constraint.
+try {
+  const hasFK = sqlite.query<{ sql: string }, []>(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+  ).get();
+  if (hasFK?.sql?.includes("REFERENCES `playbooks`")) {
+    sqlite.run("PRAGMA foreign_keys = OFF");
+    sqlite.run(`CREATE TABLE jobs_new (
+      id TEXT PRIMARY KEY NOT NULL, prompt TEXT NOT NULL, project_id TEXT NOT NULL,
+      playbook_id TEXT, agent_id TEXT, agent_override TEXT, model_override TEXT,
+      status TEXT DEFAULT 'pending' NOT NULL, parent_job_id TEXT, context_from TEXT,
+      session_id TEXT, summary TEXT, cost TEXT, started_at TEXT, completed_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id)
+    )`);
+    sqlite.run("INSERT INTO jobs_new SELECT id,prompt,project_id,playbook_id,agent_id,agent_override,model_override,status,parent_job_id,context_from,session_id,summary,cost,started_at,completed_at,created_at FROM jobs");
+    sqlite.run("DROP TABLE jobs");
+    sqlite.run("ALTER TABLE jobs_new RENAME TO jobs");
+    sqlite.run("PRAGMA foreign_keys = ON");
+    console.log("✓ Dropped FK on jobs.playbook_id");
+  }
+} catch (e) {
+  console.warn("⚠️  Could not drop jobs.playbook_id FK:", e);
+}
+// Safety net: ensure pid column exists (added in 0004)
+try {
+  sqlite.run("ALTER TABLE jobs ADD COLUMN pid INTEGER");
+} catch { /* already exists */ }
 console.log("✓ Migrations applied");
 
 // Seed default OpenCode runner if none exists
@@ -90,7 +121,7 @@ if (existingRunners.length === 0) {
     id: randomUUID(),
     type: "opencode",
     name: "OpenCode",
-    config: JSON.stringify({ binaryPath: "opencode", defaultModel: "" }),
+    config: JSON.stringify({ binaryPath: "opencode", defaultModel: "", maxConcurrent: 1 }),
     enabled: true,
     status: "unknown",
     createdAt: now,
@@ -98,6 +129,9 @@ if (existingRunners.length === 0) {
   });
   console.log("✓ Default OpenCode runner seeded");
 }
+
+// Start background job dispatcher (recovers stale jobs, then polls)
+await startDispatcher();
 
 console.log(`🚀 AgentForge API running on http://localhost:${port}`);
 console.log(`   Health: http://localhost:${port}/api/health`);
