@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { eventBus } from "../lib/events.js";
 import { materializePlaybook } from "./materializer.js";
+import { extractSessionId } from "./opencode-session.js";
 import { JOB_STATUS, SSE_EVENT } from "@agentforge/shared";
 
 /**
@@ -23,6 +24,64 @@ async function resolveModel(
   }
 
   return "anthropic/claude-sonnet-4-5";
+}
+
+/**
+ * Checks if an Ollama model is available locally and pulls it if not.
+ * Emits job events with pull progress.
+ */
+async function ensureOllamaModel(modelName: string, jobId: string): Promise<void> {
+  const baseURL = (globalThis as Record<string, unknown> & { Bun?: { env?: Record<string, string> } })
+    .Bun?.env?.OLLAMA_BASE_URL ?? "http://localhost:11434";
+  const ollamaRoot = baseURL.replace(/\/v1$/, "");
+
+  // Check if model exists
+  const showRes = await fetch(`${ollamaRoot}/api/show`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: modelName }),
+  });
+
+  if (showRes.ok) return; // Model already present
+
+  // Pull the model — Ollama streams NDJSON progress lines
+  console.log(`[job ${jobId}] Ollama model "${modelName}" not found locally, pulling…`);
+  await logJobEvent(jobId, "ollama_pull_start", { model: modelName });
+
+  const pullRes = await fetch(`${ollamaRoot}/api/pull`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: modelName, stream: true }),
+  });
+
+  if (!pullRes.ok || !pullRes.body) {
+    throw new Error(`Failed to pull Ollama model "${modelName}": HTTP ${pullRes.status}`);
+  }
+
+  const reader = pullRes.body.getReader();
+  const decoder = new TextDecoder();
+  let lastStatus = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const line of decoder.decode(value).split("\n").filter(Boolean)) {
+      try {
+        const event = JSON.parse(line) as { status?: string; error?: string };
+        if (event.error) throw new Error(`Ollama pull error: ${event.error}`);
+        if (event.status && event.status !== lastStatus) {
+          lastStatus = event.status;
+          console.log(`[job ${jobId}] ollama pull: ${event.status}`);
+        }
+      } catch (e) {
+        if (e instanceof SyntaxError) continue; // incomplete JSON line
+        throw e;
+      }
+    }
+  }
+
+  await logJobEvent(jobId, "ollama_pull_done", { model: modelName });
+  console.log(`[job ${jobId}] Ollama model "${modelName}" ready.`);
 }
 
 /**
@@ -56,21 +115,26 @@ export async function executeJob(jobId: string): Promise<void> {
   eventBus.emit({ type: SSE_EVENT.JOB_STARTED, data: { jobId, startedAt: now } });
 
   try {
-    // 1. Materialize playbook as OPENCODE_CONFIG_DIR
+    // 1. Resolve model first so the materializer can inject provider config
+    const model = await resolveModel(job.modelOverride, project.defaultModel);
+
+    // 1b. If using Ollama, ensure the model is available locally (pull if needed)
+    if (model.startsWith("ollama/")) {
+      await ensureOllamaModel(model.slice("ollama/".length), jobId);
+    }
+
+    // 2. Materialize playbook as OPENCODE_CONFIG_DIR (passes resolved model)
     const configDir = await materializePlaybook(
       job.playbookId!,
       jobId,
-      job.modelOverride,
+      model,
     );
 
-    // 2. Build prompt (with parent context if chained)
+    // 3. Build prompt (with parent context if chained)
     let fullPrompt = job.prompt;
     if (job.contextFrom) {
       fullPrompt = `## Context from previous step\n${job.contextFrom}\n\n## Your task\n${job.prompt}`;
     }
-
-    // 3. Resolve model
-    const model = await resolveModel(job.modelOverride, project.defaultModel);
 
     // 4. Build opencode CLI args
     const args = ["run", fullPrompt, "--model", model, "--format", "json"];
@@ -82,6 +146,9 @@ export async function executeJob(jobId: string): Promise<void> {
       : `data/workspaces/${project.id}`;
 
     // 6. Launch opencode
+    console.log(`[job ${jobId}] cwd: ${cwd}`);
+    console.log(`[job ${jobId}] cmd: opencode ${args.map((a) => a.includes(" ") ? `"${a}"` : a).join(" ")}`);
+    console.log(`[job ${jobId}] OPENCODE_CONFIG_DIR: ${configDir}`);
     const proc = Bun.spawn(["opencode", ...args], {
       cwd,
       env: {
@@ -106,7 +173,7 @@ export async function executeJob(jobId: string): Promise<void> {
     if (exitCode !== 0) {
       await db
         .update(schema.jobs)
-        .set({ status: JOB_STATUS.FAILED, summary: [stderr, stdout].filter(Boolean).join("\n---\n") || `exit code ${exitCode}`, completedAt: new Date().toISOString() })
+        .set({ status: JOB_STATUS.FAILED, summary: [stderr, stdout].filter(Boolean).join("\n---\n") || `exit code ${exitCode}`, sessionId: extractSessionId(stdout) ?? undefined, completedAt: new Date().toISOString() })
         .where(eq(schema.jobs.id, jobId));
 
       eventBus.emit({ type: SSE_EVENT.JOB_FAILED, data: { jobId, error: stderr } });
@@ -114,17 +181,14 @@ export async function executeJob(jobId: string): Promise<void> {
       return;
     }
 
-    // 7. Extract summary
-    let summary = stdout;
-    try {
-      const parsed = JSON.parse(stdout);
-      summary = parsed.result ?? parsed.content ?? stdout;
-    } catch { /* use raw text */ }
+    // 7. Extract sessionId and summary
+    const sessionId = extractSessionId(stdout);
+    const summary = stdout;
 
     // 8. Complete
     await db
       .update(schema.jobs)
-      .set({ status: JOB_STATUS.COMPLETED, summary, completedAt: new Date().toISOString() })
+      .set({ status: JOB_STATUS.COMPLETED, summary, sessionId: sessionId ?? undefined, completedAt: new Date().toISOString() })
       .where(eq(schema.jobs.id, jobId));
 
     eventBus.emit({ type: SSE_EVENT.JOB_COMPLETED, data: { jobId, summary: summary.slice(0, 500) } });

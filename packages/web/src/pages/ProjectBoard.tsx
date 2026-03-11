@@ -1,5 +1,6 @@
 import { createResource, createSignal, For, Show, onCleanup } from "solid-js";
 import { useParams } from "@solidjs/router";
+import { Portal } from "solid-js/web";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -7,11 +8,46 @@ interface Job {
   id: string;
   prompt: string;
   playbookId: string | null;
+  modelOverride: string | null;
   status: string;
   summary: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
+}
+
+interface JobEvent {
+  id: string;
+  jobId: string;
+  eventType: string;
+  payload: string;
+  createdAt: string;
+}
+
+interface ConversationPart {
+  id: string;
+  type: string;
+  text?: string;
+  toolName?: string;
+  toolInput?: unknown;
+  toolOutput?: string;
+  tokens?: { total: number; input: number; output: number; reasoning: number };
+  cost?: number;
+  finishReason?: string;
+}
+
+interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  createdAt: number;
+  model?: string;
+  provider?: string;
+  parts: ConversationPart[];
+}
+
+interface JobDetail extends Job {
+  events: JobEvent[];
+  conversation: ConversationMessage[];
 }
 
 interface Project {
@@ -60,6 +96,11 @@ async function fetchPlaybooks(): Promise<Playbook[]> {
   return (await res.json() as { data: Playbook[] }).data;
 }
 
+async function fetchJobDetail(id: string): Promise<JobDetail> {
+  const res = await fetch(`/api/v1/jobs/${id}`);
+  return (await res.json() as { data: JobDetail }).data;
+}
+
 // ─── Component ───────────────────────────────────────────────────────
 
 export default function ProjectBoard() {
@@ -72,11 +113,17 @@ export default function ProjectBoard() {
   const interval = setInterval(refetchJobs, 5000);
   onCleanup(() => clearInterval(interval));
 
-  // Modal state
+  // New task modal
   const [showModal, setShowModal] = createSignal(false);
   const [selectedPlaybook, setSelectedPlaybook] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [submitting, setSubmitting] = createSignal(false);
+
+  // Job detail drawer
+  const [detailJobId, setDetailJobId] = createSignal<string | null>(null);
+  const [jobDetail, { refetch: refetchDetail }] = createResource(detailJobId, (id) =>
+    id ? fetchJobDetail(id) : Promise.resolve(null),
+  );
 
   async function submitTask() {
     if (!selectedPlaybook() || !prompt().trim()) return;
@@ -176,6 +223,7 @@ export default function ProjectBoard() {
                             playbookProfile={playbookMap()[job.playbookId ?? ""]?.permissionProfile}
                             profileColor={profileColor}
                             onCancel={() => cancelJob(job.id)}
+                            onClick={() => { setDetailJobId(job.id); refetchDetail(); }}
                           />
                         )}
                       </For>
@@ -187,6 +235,198 @@ export default function ProjectBoard() {
           </For>
         </div>
       </div>
+
+      {/* ── Job Detail Drawer ────────────────────────────────────── */}
+      <Show when={detailJobId()}>
+        <Portal>
+          {/* Backdrop */}
+          <div
+            class="fixed inset-0 bg-black/50 z-40"
+            onClick={() => setDetailJobId(null)}
+          />
+          {/* Drawer */}
+          <div class="fixed right-0 top-0 h-full w-full max-w-2xl bg-gray-900 border-l border-gray-700 z-50 flex flex-col shadow-2xl">
+            {/* Header */}
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800 flex-shrink-0">
+              <h2 class="font-semibold text-base">Job Detail</h2>
+              <div class="flex items-center gap-3">
+                <Show when={jobDetail()?.status === "running" || jobDetail()?.status === "pending"}>
+                  <button
+                    onClick={async () => { await cancelJob(detailJobId()!); refetchDetail(); }}
+                    class="text-xs text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </Show>
+                <button
+                  onClick={() => setDetailJobId(null)}
+                  class="text-gray-500 hover:text-gray-200 transition-colors text-lg leading-none"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <Show when={jobDetail.loading}>
+              <div class="flex-1 flex items-center justify-center">
+                <p class="text-gray-500 text-sm animate-pulse">Loading…</p>
+              </div>
+            </Show>
+
+            <Show when={!jobDetail.loading && jobDetail()}>
+              {(detail) => {
+                const statusColor: Record<string, string> = {
+                  pending:       "bg-gray-700 text-gray-300",
+                  running:       "bg-blue-900/60 text-blue-300",
+                  waiting_input: "bg-amber-900/60 text-amber-300",
+                  completed:     "bg-emerald-900/60 text-emerald-300",
+                  failed:        "bg-red-900/60 text-red-300",
+                  cancelled:     "bg-gray-800 text-gray-500",
+                };
+
+                // Token stats from the last step-finish part
+                const tokenStats = () => {
+                  for (const msg of detail().conversation) {
+                    for (const part of msg.parts) {
+                      if (part.type === "step-finish" && part.tokens) return part;
+                    }
+                  }
+                  return null;
+                };
+
+                return (
+                  <div class="flex-1 overflow-y-auto flex flex-col min-h-0">
+                    {/* Meta */}
+                    <div class="px-6 py-4 space-y-3 border-b border-gray-800 flex-shrink-0">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class={`text-xs px-2 py-0.5 rounded ${statusColor[detail().status] ?? "bg-gray-700 text-gray-400"}`}>
+                          {detail().status}
+                        </span>
+                        <Show when={detail().modelOverride}>
+                          <span class="text-xs font-mono bg-gray-800 text-gray-400 px-2 py-0.5 rounded">{detail().modelOverride}</span>
+                        </Show>
+                        <Show when={detail().playbookId}>
+                          <span class="text-xs text-gray-500">{playbookMap()[detail().playbookId!]?.name ?? detail().playbookId}</span>
+                        </Show>
+                        <Show when={tokenStats()}>
+                          {(s) => (
+                            <span class="text-xs text-gray-600">
+                              {s().tokens!.total} tokens
+                              <Show when={s().tokens!.reasoning > 0}>
+                                <span class="text-purple-500"> · {s().tokens!.reasoning} reasoning</span>
+                              </Show>
+                            </span>
+                          )}
+                        </Show>
+                      </div>
+
+                      <div>
+                        <p class="text-xs text-gray-500 mb-1">Prompt</p>
+                        <p class="text-sm text-gray-200 whitespace-pre-wrap bg-gray-800/60 rounded px-3 py-2">{detail().prompt}</p>
+                      </div>
+
+                      <div class="flex gap-4 text-xs text-gray-600">
+                        <Show when={detail().startedAt}>
+                          <span>Started: {new Date(detail().startedAt!).toLocaleString()}</span>
+                        </Show>
+                        <Show when={detail().completedAt}>
+                          <span>Finished: {new Date(detail().completedAt!).toLocaleString()}</span>
+                        </Show>
+                      </div>
+                    </div>
+
+                    {/* Conversation */}
+                    <div class="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+                      <Show
+                        when={detail().conversation.length > 0}
+                        fallback={<p class="text-xs text-gray-600">No conversation data yet.</p>}
+                      >
+                        <For each={detail().conversation}>
+                          {(msg) => (
+                            <div class={`space-y-2 ${msg.role === "user" ? "pl-4" : ""}`}>
+                              {/* Role badge */}
+                              <p class={`text-xs font-semibold ${msg.role === "user" ? "text-blue-400" : "text-emerald-400"}`}>
+                                {msg.role === "user" ? "You" : `Agent${msg.model ? ` · ${msg.model}` : ""}`}
+                              </p>
+
+                              {/* Parts */}
+                              <For each={msg.parts.filter(p => p.type === "text" || p.type === "reasoning" || p.type === "tool-call" || p.type === "tool-result")}>
+                                {(part) => (
+                                  <Show when={part.type === "text" && part.text}>
+                                    <div class={`rounded-lg px-4 py-3 text-sm ${
+                                      msg.role === "user"
+                                        ? "bg-blue-900/20 border border-blue-800/30 text-gray-200"
+                                        : "bg-gray-800 text-gray-200"
+                                    }`}>
+                                      <p class="whitespace-pre-wrap leading-relaxed">{part.text}</p>
+                                    </div>
+                                  </Show>
+                                )}
+                              </For>
+
+                              {/* Reasoning (collapsible) */}
+                              <For each={msg.parts.filter(p => p.type === "reasoning" && p.text)}>
+                                {(part) => (
+                                  <details class="group">
+                                    <summary class="text-xs text-purple-400/70 cursor-pointer hover:text-purple-300 transition-colors list-none flex items-center gap-1">
+                                      <span class="group-open:rotate-90 transition-transform inline-block">▶</span>
+                                      Reasoning ({part.text!.length} chars)
+                                    </summary>
+                                    <pre class="mt-2 text-xs text-gray-500 bg-gray-900/80 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap leading-relaxed border border-gray-800">{part.text}</pre>
+                                  </details>
+                                )}
+                              </For>
+
+                              {/* Tool calls */}
+                              <For each={msg.parts.filter(p => p.type === "tool-call")}>
+                                {(part) => (
+                                  <div class="text-xs bg-amber-900/20 border border-amber-800/30 rounded px-3 py-2">
+                                    <span class="text-amber-400 font-mono">{part.toolName}</span>
+                                    <pre class="text-gray-500 mt-1 overflow-x-auto">{JSON.stringify(part.toolInput, null, 2)}</pre>
+                                  </div>
+                                )}
+                              </For>
+                            </div>
+                          )}
+                        </For>
+                      </Show>
+
+                      {/* Events timeline */}
+                      <Show when={detail().events.length > 0}>
+                        <div class="border-t border-gray-800 pt-4 mt-2">
+                          <p class="text-xs font-semibold text-gray-500 mb-3 uppercase tracking-wider">Events</p>
+                          <div class="space-y-1">
+                            <For each={detail().events}>
+                              {(ev) => (
+                                <div class="flex items-start gap-2 text-xs">
+                                  <span class="text-gray-700 shrink-0 font-mono mt-0.5">
+                                    {new Date(ev.createdAt).toLocaleTimeString()}
+                                  </span>
+                                  <span class={`font-mono shrink-0 ${
+                                    ev.eventType === "failed" || ev.eventType === "error" ? "text-red-400" :
+                                    ev.eventType === "completed" ? "text-emerald-400" :
+                                    ev.eventType.startsWith("ollama") ? "text-amber-400" :
+                                    "text-gray-400"
+                                  }`}>
+                                    {ev.eventType}
+                                  </span>
+                                  <Show when={ev.payload !== "{}"}>
+                                    <span class="text-gray-600 truncate">{ev.payload}</span>
+                                  </Show>
+                                </div>
+                              )}
+                            </For>
+                          </div>
+                        </div>
+                      </Show>
+                    </div>
+                  </div>
+                );
+              }}
+            </Show>
+          </div>
+        </Portal>
+      </Show>
 
       {/* ── New Task Modal ────────────────────────────────────────── */}
       <Show when={showModal()}>
@@ -291,6 +531,7 @@ function JobCard(props: {
   playbookProfile?: string;
   profileColor: Record<string, string>;
   onCancel: () => void;
+  onClick: () => void;
 }) {
   const canCancel = () => props.job.status === "pending" || props.job.status === "running";
 
@@ -304,7 +545,10 @@ function JobCard(props: {
   };
 
   return (
-    <div class="bg-gray-800/80 border border-gray-700/60 rounded-lg p-3 space-y-2 group">
+    <div
+      class="bg-gray-800/80 border border-gray-700/60 rounded-lg p-3 space-y-2 group cursor-pointer hover:border-gray-600 transition-colors"
+      onClick={props.onClick}
+    >
       <p class="text-sm leading-snug line-clamp-3 text-gray-200">{props.job.prompt}</p>
 
       <div class="flex items-center justify-between gap-2">
@@ -329,7 +573,7 @@ function JobCard(props: {
 
       <Show when={canCancel()}>
         <button
-          onClick={props.onCancel}
+          onClick={(e) => { e.stopPropagation(); props.onCancel(); }}
           class="w-full text-xs text-gray-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 pt-1"
         >
           Cancel task

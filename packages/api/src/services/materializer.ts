@@ -65,6 +65,28 @@ export async function materializePlaybook(
     },
   };
 
+  // Inject Ollama provider config when the model is ollama/*
+  if (modelOverride?.startsWith("ollama/")) {
+    const ollamaModel = modelOverride.slice("ollama/".length);
+    opencodeConfig.provider = {
+      ollama: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Ollama",
+        options: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          baseURL: (globalThis as any).Bun?.env?.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
+        },
+        models: {
+          [ollamaModel]: {
+            name: ollamaModel,
+            attachment: false,
+            reasoning: false,
+          },
+        },
+      },
+    };
+  }
+
   // Add MCP servers (still DB-backed)
   if (playbook.mcpIds.length > 0) {
     const mcpConfig: Record<string, unknown> = {};

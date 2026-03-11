@@ -33,7 +33,23 @@
       "Bash(curl -s -X POST 'http://localhost:4080/api/v1/jobs' -H 'Content-Type: application/json' -d '{\"\"prompt\"\":\"\"lista los ficheros del proyecto\"\",\"\"projectId\"\":\"\"60a044ac-1712-444e-8a1b-4e0e234b2fb5\"\",\"\"playbookId\"\":\"\"refactor-and-document\"\"}')",
       "Bash(curl -s 'http://localhost:4080/api/v1/jobs/793dec74-f35b-4a24-be86-cb3e44cabafb')",
       "Bash(curl -s -X POST 'http://localhost:4080/api/v1/jobs' -H 'Content-Type: application/json' -d '{\"\"prompt\"\":\"\"lista los ficheros raiz del proyecto\"\",\"\"projectId\"\":\"\"60a044ac-1712-444e-8a1b-4e0e234b2fb5\"\",\"\"playbookId\"\":\"\"refactor-and-document\"\"}')",
-      "Bash(curl -s 'http://localhost:4080/api/v1/jobs/49d57344-58e9-43cb-b279-2a95de7bd1b1')"
+      "Bash(curl -s 'http://localhost:4080/api/v1/jobs/49d57344-58e9-43cb-b279-2a95de7bd1b1')",
+      "Bash(curl -s 'http://localhost:4080/api/v1/jobs?project_id=60a044ac-1712-444e-8a1b-4e0e234b2fb5')",
+      "Bash(bunx tsc --noEmit --skipLibCheck)",
+      "Bash(sqlite3 data/agentforge.db \"SELECT id, status, substr\\(summary, 1, 2000\\) FROM jobs ORDER BY created_at DESC LIMIT 3;\")",
+      "Bash(sqlite3 data/agentforge.db \"SELECT length\\(summary\\), summary FROM jobs WHERE id=''16ce9053-bf3f-409c-81c4-f829bc47832c'';\")",
+      "Read(//Users/ruben.civeiraiglesia/.local/share/opencode/storage/message/**)",
+      "Read(//Users/ruben.civeiraiglesia/.local/share/opencode/storage/**)",
+      "Read(//Users/ruben.civeiraiglesia/.local/share/opencode/**)",
+      "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT id, role, substr\\(parts, 1, 500\\) FROM message WHERE session_id=''ses_32363a3fbffeONwDdzra70wmV3'';\")",
+      "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT id, substr\\(data, 1, 600\\) FROM message WHERE session_id=''ses_32363a3fbffeONwDdzra70wmV3'';\")",
+      "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT id, substr\\(data, 1, 800\\) FROM part WHERE session_id=''ses_32363a3fbffeONwDdzra70wmV3'';\")",
+      "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT id, message_id, substr\\(data, 1, 1000\\) FROM part WHERE message_id=''msg_cdc9c5c41001r6920Drxt9pJgI'' ORDER BY time_created;\")",
+      "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT count\\(*\\) FROM part WHERE session_id=''ses_32363a3fbffeONwDdzra70wmV3'';\")",
+      "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT id, message_id, json_extract\\(data,''$.type''\\), length\\(data\\) FROM part WHERE session_id=''ses_32363a3fbffeONwDdzra70wmV3'' ORDER BY time_created;\")",
+      "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db 'SELECT id, substr\\(summary, 1, 300\\) FROM jobs WHERE session_id IS NULL AND summary IS NOT NULL;')",
+      "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db ':*)",
+      "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db 'SELECT id, session_id FROM jobs WHERE session_id IS NOT NULL;')"
     ]
   }
 }

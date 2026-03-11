@@ -2,6 +2,6 @@
   "ollama": {
     "enabled": true,
     "baseUrl": "http://localhost:11434",
-    "numCtx": 16384
+    "numCtx": 4096
   }
 }

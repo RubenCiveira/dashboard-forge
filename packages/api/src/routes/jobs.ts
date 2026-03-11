@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { jobs } from "../db/schema.js";
+import { jobs, jobEvents } from "../db/schema.js";
 import { NotFoundError } from "../lib/errors.js";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, asc } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { JOB_STATUS } from "@agentforge/shared";
+import { getOpenCodeSession } from "../services/opencode-session.js";
 
 export const jobsRouter = new Hono();
 
@@ -35,12 +36,18 @@ jobsRouter.get("/", zValidator("query", listQuerySchema), async (ctx) => {
   return ctx.json({ data: rows });
 });
 
-/** GET /api/v1/jobs/:id — Get a single job */
+/** GET /api/v1/jobs/:id — Get a single job with its events and OpenCode conversation */
 jobsRouter.get("/:id", async (ctx) => {
   const id = ctx.req.param("id");
   const row = await db.select().from(jobs).where(eq(jobs.id, id)).get();
   if (!row) throw new NotFoundError("Job", id);
-  return ctx.json({ data: row });
+  const events = await db
+    .select()
+    .from(jobEvents)
+    .where(eq(jobEvents.jobId, id))
+    .orderBy(asc(jobEvents.createdAt));
+  const conversation = row.sessionId ? getOpenCodeSession(row.sessionId) : [];
+  return ctx.json({ data: { ...row, events, conversation } });
 });
 
 /** POST /api/v1/jobs — Create a job linked to a playbook */
@@ -66,11 +73,20 @@ jobsRouter.post(
   },
 );
 
-/** POST /api/v1/jobs/:id/cancel — Cancel a pending or running job */
+/** POST /api/v1/jobs/:id/cancel — Cancel a pending or running job, killing the process if alive */
 jobsRouter.post("/:id/cancel", async (ctx) => {
   const id = ctx.req.param("id");
   const row = await db.select().from(jobs).where(eq(jobs.id, id)).get();
   if (!row) throw new NotFoundError("Job", id);
+
+  // Kill the opencode process if we have its PID
+  if (row.pid) {
+    try {
+      process.kill(row.pid, "SIGTERM");
+    } catch {
+      // Process already gone — ignore
+    }
+  }
 
   await db
     .update(jobs)
