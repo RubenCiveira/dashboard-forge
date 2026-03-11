@@ -7,14 +7,13 @@ import { JOB_STATUS, SSE_EVENT } from "@agentforge/shared";
 
 /**
  * Resolves the model to use for a job.
- * Priority: job.modelOverride → project.defaultModel → runner.defaultModel → hardcoded fallback.
+ * Priority: job.modelOverride → runner.defaultModel → null (use OpenCode default).
+ * Returns null to let OpenCode use whatever model is configured in its own config.
  */
 async function resolveModel(
   jobModelOverride: string | null | undefined,
-  projectDefaultModel: string,
-): Promise<string> {
+): Promise<string | null> {
   if (jobModelOverride) return jobModelOverride;
-  if (projectDefaultModel) return projectDefaultModel;
 
   // Fallback: first enabled runner's defaultModel
   const runner = await db.select().from(schema.runners).limit(1).get();
@@ -23,7 +22,8 @@ async function resolveModel(
     if (cfg.defaultModel) return cfg.defaultModel;
   }
 
-  return "anthropic/claude-sonnet-4-5";
+  // No model configured anywhere — let OpenCode use its own default
+  return null;
 }
 
 /**
@@ -116,10 +116,10 @@ export async function executeJob(jobId: string): Promise<void> {
 
   try {
     // 1. Resolve model first so the materializer can inject provider config
-    const model = await resolveModel(job.modelOverride, project.defaultModel);
+    const model = await resolveModel(job.modelOverride);
 
     // 1b. If using Ollama, ensure the model is available locally (pull if needed)
-    if (model.startsWith("ollama/")) {
+    if (model?.startsWith("ollama/")) {
       await ensureOllamaModel(model.slice("ollama/".length), jobId);
     }
 
@@ -136,8 +136,9 @@ export async function executeJob(jobId: string): Promise<void> {
       fullPrompt = `## Context from previous step\n${job.contextFrom}\n\n## Your task\n${job.prompt}`;
     }
 
-    // 4. Build opencode CLI args
-    const args = ["run", fullPrompt, "--model", model, "--format", "json"];
+    // 4. Build opencode CLI args — omit --model when null (use OpenCode's own default)
+    const args = ["run", fullPrompt, "--format", "json"];
+    if (model) args.push("--model", model);
     if (job.agentOverride) args.push("--agent", job.agentOverride);
 
     // 5. Working directory
@@ -166,9 +167,15 @@ export async function executeJob(jobId: string): Promise<void> {
       .set({ pid: proc.pid })
       .where(eq(schema.jobs.id, jobId));
 
-    const stdout   = await new Response(proc.stdout).text();
-    const stderr   = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
+    // Read stdout and stderr concurrently to avoid pipe-buffer deadlocks
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    // Ensure the process is dead (handles cases where pipes closed but process lingers)
+    try { proc.kill(); } catch { /* already dead */ }
 
     if (exitCode !== 0) {
       await db

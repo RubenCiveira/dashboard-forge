@@ -129,7 +129,6 @@ export const projectSchema = z.object({
   sourceType: z.enum([PROJECT_SOURCE.LOCAL, PROJECT_SOURCE.GIT]),
   sourcePath: z.string().min(1),
   branch: z.string().nullable().default(null),
-  defaultModel: z.string().default("ollama/qwen3:8b-16k"),
   envVars: z.record(z.string()).default({}),
   playbookIds: z.array(z.string().min(1)).default([]),
   createdAt: z.string().datetime(),

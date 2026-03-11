@@ -70,7 +70,6 @@ export const projects = sqliteTable("projects", {
   sourceType: text("source_type").notNull(),
   sourcePath: text("source_path").notNull(),
   branch: text("branch"),
-  defaultModel: text("default_model").notNull().default("ollama/qwen3:8b-16k"),
   envVars: text("env_vars").notNull().default("{}"),
   playbookIds: text("playbook_ids").notNull().default("[]"),
   createdAt: text("created_at").notNull(),

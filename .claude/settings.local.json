@@ -49,7 +49,19 @@
       "Bash(sqlite3 ~/.local/share/opencode/opencode.db \"SELECT id, message_id, json_extract\\(data,''$.type''\\), length\\(data\\) FROM part WHERE session_id=''ses_32363a3fbffeONwDdzra70wmV3'' ORDER BY time_created;\")",
       "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db 'SELECT id, substr\\(summary, 1, 300\\) FROM jobs WHERE session_id IS NULL AND summary IS NOT NULL;')",
       "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db ':*)",
-      "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db 'SELECT id, session_id FROM jobs WHERE session_id IS NOT NULL;')"
+      "Bash(sqlite3 /Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/data/agentforge.db 'SELECT id, session_id FROM jobs WHERE session_id IS NOT NULL;')",
+      "Bash(bun run -e \":*)",
+      "Bash(bun packages/api/src/db/index.ts)",
+      "Bash(bun --eval \":*)",
+      "Bash(sqlite3 ./data/agentforge.db \"SELECT id, name, default_model FROM projects;\")",
+      "Bash(sqlite3 ./data/agentforge.db \"ALTER TABLE projects DROP COLUMN default_model;\")",
+      "Bash(sqlite3 ./data/agentforge.db \"PRAGMA table_info\\(projects\\);\")",
+      "Bash(sqlite3 ./data/agentforge.db \"SELECT * FROM __drizzle_migrations;\")",
+      "Bash(for f:*)",
+      "Bash(do echo:*)",
+      "Read(//Users/ruben.civeiraiglesia/Documents/Proyectos/Personal/dashboard-forge/**)",
+      "Bash(shasum -a 256 packages/api/drizzle/0000_chubby_marvel_apes.sql packages/api/drizzle/0001_concerned_dreadnoughts.sql)",
+      "Bash(sqlite3 ./data/agentforge.db \":*)"
     ]
   }
 }

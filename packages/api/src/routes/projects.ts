@@ -39,7 +39,6 @@ projectsRouter.post(
       sourcePath: body.sourcePath,
       sourceType: body.sourceType,
       branch: body.branch ?? null,
-      defaultModel: "ollama/qwen3:8b",
       envVars: "{}",
       playbookIds: "[]",
       createdAt: now,
