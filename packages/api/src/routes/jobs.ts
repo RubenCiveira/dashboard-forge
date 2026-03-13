@@ -6,8 +6,11 @@ import { jobs, jobEvents } from "../db/schema.js";
 import { NotFoundError } from "../lib/errors.js";
 import { eq, desc, asc } from "drizzle-orm";
 import { randomUUID } from "crypto";
-import { JOB_STATUS } from "@agentforge/shared";
+import { JOB_STATUS, respondJobSchema } from "@agentforge/shared";
 import { getOpenCodeSession } from "../services/opencode-session.js";
+import { respondToJob } from "../services/orchestrator.js";
+import { releaseJobSlot } from "../services/job-dispatcher.js";
+import { ApiError } from "../lib/errors.js";
 
 export const jobsRouter = new Hono();
 
@@ -73,6 +76,40 @@ jobsRouter.post(
   },
 );
 
+/** POST /api/v1/jobs/:id/respond — Respond to a job waiting for human input */
+jobsRouter.post(
+  "/:id/respond",
+  zValidator("json", respondJobSchema),
+  async (ctx) => {
+    const id = ctx.req.param("id");
+    const body = ctx.req.valid("json");
+
+    const row = await db.select().from(jobs).where(eq(jobs.id, id)).get();
+    if (!row) throw new NotFoundError("Job", id);
+
+    if (row.status !== JOB_STATUS.WAITING_INPUT) {
+      throw new ApiError(
+        "JOB_NOT_WAITING",
+        `Job is not waiting for input (current status: ${row.status})`,
+        400,
+      );
+    }
+
+    try {
+      await respondToJob(id, body.action, body.message);
+    } catch (err) {
+      throw new ApiError(
+        "RESPOND_FAILED",
+        err instanceof Error ? err.message : String(err),
+        409,
+      );
+    }
+
+    const updated = await db.select().from(jobs).where(eq(jobs.id, id)).get();
+    return ctx.json({ data: updated });
+  },
+);
+
 /** POST /api/v1/jobs/:id/cancel — Cancel a pending or running job, killing the process if alive */
 jobsRouter.post("/:id/cancel", async (ctx) => {
   const id = ctx.req.param("id");
@@ -92,6 +129,10 @@ jobsRouter.post("/:id/cancel", async (ctx) => {
     .update(jobs)
     .set({ status: JOB_STATUS.CANCELLED, completedAt: new Date().toISOString() })
     .where(eq(jobs.id, id));
+
+  // Free the concurrency slot immediately so the dispatcher can pick up the
+  // next pending job without waiting for the in-flight executeJob to resolve.
+  releaseJobSlot(id);
 
   const updated = await db.select().from(jobs).where(eq(jobs.id, id)).get();
   return ctx.json({ data: updated });

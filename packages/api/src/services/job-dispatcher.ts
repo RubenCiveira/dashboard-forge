@@ -19,34 +19,28 @@ import { executeJob } from "./orchestrator.js";
  * If their PID is no longer alive, mark them FAILED.
  */
 async function recoverStaleJobs(): Promise<void> {
-  const stale = await db
-    .select()
-    .from(schema.jobs)
-    .where(eq(schema.jobs.status, JOB_STATUS.RUNNING));
+  // Jobs left in RUNNING or WAITING_INPUT after a restart have lost their
+  // in-memory OpenCode session and can never complete — mark them failed.
+  const staleStatuses = [JOB_STATUS.RUNNING, JOB_STATUS.WAITING_INPUT] as const;
 
-  for (const job of stale) {
-    let alive = false;
-    if (job.pid) {
-      try {
-        process.kill(job.pid, 0); // signal 0 = existence check, no signal sent
-        alive = true;
-      } catch {
-        alive = false;
-      }
-    }
+  for (const status of staleStatuses) {
+    const stale = await db
+      .select()
+      .from(schema.jobs)
+      .where(eq(schema.jobs.status, status));
 
-    if (!alive) {
+    for (const job of stale) {
       await db
         .update(schema.jobs)
         .set({
           status:      JOB_STATUS.FAILED,
-          summary:     `Process interrupted (PID ${job.pid ?? "unknown"} — server restart)`,
+          summary:     `Session lost (server restart while job was ${status})`,
           completedAt: new Date().toISOString(),
           pid:         null,
         })
         .where(eq(schema.jobs.id, job.id));
 
-      console.log(`[dispatcher] Stale job ${job.id} (PID ${job.pid}) marked as failed`);
+      console.log(`[dispatcher] Stale job ${job.id} (${status}) marked as failed`);
     }
   }
 }
@@ -114,4 +108,14 @@ export function stopDispatcher(): void {
     clearInterval(timer);
     timer = null;
   }
+}
+
+/**
+ * Immediately releases the concurrency slot for a job.
+ * Call this when a job is cancelled externally (e.g. via HTTP) so the
+ * dispatcher can pick up the next pending job without waiting for the
+ * in-flight executeJob promise to resolve.
+ */
+export function releaseJobSlot(jobId: string): void {
+  running.delete(jobId);
 }

@@ -137,13 +137,13 @@ await startDispatcher();
 // Start OpenCode server pool idle reaper
 startIdleReaper();
 
-// Graceful shutdown: kill all managed OpenCode server processes
-const onShutdown = () => {
-  shutdownPool();
-};
-process.on("SIGTERM", onShutdown);
-process.on("SIGINT", onShutdown);
-process.on("exit", onShutdown);
+// Graceful shutdown: kill all managed OpenCode server processes.
+// Cleanup runs once from the exit event; signal handlers just trigger exit
+// so the process actually terminates (otherwise Bun HMR would try to rebind
+// the port and fail with EADDRINUSE).
+process.on("exit", shutdownPool);
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
 
 console.log(`🚀 AgentForge API running on http://localhost:${port}`);
 console.log(`   Health: http://localhost:${port}/api/health`);

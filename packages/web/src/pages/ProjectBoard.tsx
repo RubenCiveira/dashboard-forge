@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show, onCleanup } from "solid-js";
+import { createResource, createSignal, For, Show, onCleanup, onMount } from "solid-js";
 import { useParams } from "@solidjs/router";
 import { Portal } from "solid-js/web";
 
@@ -101,6 +101,52 @@ async function fetchJobDetail(id: string): Promise<JobDetail> {
   return (await res.json() as { data: JobDetail }).data;
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Returns the pending request info for a waiting job.
+ * Reads the last `permission_requested` or `agent_question` job event.
+ */
+function pendingRequest(events: JobEvent[]): {
+  kind: "permission" | "question";
+  title?: string;
+  permissionType?: string;
+  metadata?: Record<string, unknown>;
+  question?: string;
+} | null {
+  // Scan from newest to oldest. Track whether the most recent agent_question
+  // was already answered by a subsequent user_response event.
+  let questionAnswered = false;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    try {
+      const payload = JSON.parse(ev.payload) as Record<string, unknown>;
+      if (ev.eventType === "permission_requested") {
+        return {
+          kind: "permission",
+          title: payload.title as string | undefined,
+          permissionType: payload.type as string | undefined,
+          metadata: payload.metadata as Record<string, unknown> | undefined,
+        };
+      }
+      if (ev.eventType === "user_response") {
+        questionAnswered = true;
+        continue;
+      }
+      if (ev.eventType === "agent_question") {
+        if (questionAnswered) return null; // already answered — no structured question pending
+        return {
+          kind: "question",
+          question: payload.question as string | undefined,
+        };
+      }
+    } catch {
+      // malformed payload — skip
+    }
+  }
+  return null;
+}
+
 // ─── Component ───────────────────────────────────────────────────────
 
 export default function ProjectBoard() {
@@ -110,8 +156,31 @@ export default function ProjectBoard() {
   const [playbooks] = createResource(fetchPlaybooks);
 
   const [jobs, { refetch: refetchJobs }] = createResource(() => params.id, fetchJobs);
-  const interval = setInterval(refetchJobs, 5000);
+
+  // Fallback polling (SSE handles real-time; poll catches anything missed)
+  const interval = setInterval(refetchJobs, 10_000);
   onCleanup(() => clearInterval(interval));
+
+  // SSE — real-time job updates
+  onMount(() => {
+    const es = new EventSource("/api/v1/events");
+
+    const refresh = (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data as string) as { jobId?: string };
+        refetchJobs();
+        if (data.jobId && detailJobId() === data.jobId) refetchDetail();
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.addEventListener("job.started",       refresh);
+    es.addEventListener("job.waiting_input", refresh);
+    es.addEventListener("job.completed",     refresh);
+    es.addEventListener("job.failed",        refresh);
+    es.addEventListener("job.cancelled",     refresh);
+
+    onCleanup(() => es.close());
+  });
 
   // New task modal
   const [showModal, setShowModal] = createSignal(false);
@@ -124,6 +193,10 @@ export default function ProjectBoard() {
   const [jobDetail, { refetch: refetchDetail }] = createResource(detailJobId, (id) =>
     id ? fetchJobDetail(id) : Promise.resolve(null),
   );
+
+  // Respond panel
+  const [replyText, setReplyText] = createSignal("");
+  const [responding, setResponding] = createSignal(false);
 
   async function submitTask() {
     if (!selectedPlaybook() || !prompt().trim()) return;
@@ -147,6 +220,26 @@ export default function ProjectBoard() {
   async function cancelJob(id: string) {
     await fetch(`/api/v1/jobs/${id}/cancel`, { method: "POST" });
     refetchJobs();
+  }
+
+  async function respondJob(
+    id: string,
+    action: "approve" | "deny" | "message",
+    message?: string,
+  ) {
+    setResponding(true);
+    try {
+      await fetch(`/api/v1/jobs/${id}/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...(message ? { message } : {}) }),
+      });
+      setReplyText("");
+      refetchJobs();
+      refetchDetail();
+    } finally {
+      setResponding(false);
+    }
   }
 
   const playbookMap = () => {
@@ -284,7 +377,6 @@ export default function ProjectBoard() {
                   cancelled:     "bg-gray-800 text-gray-500",
                 };
 
-                // Token stats from the last step-finish part
                 const tokenStats = () => {
                   for (const msg of detail().conversation) {
                     for (const part of msg.parts) {
@@ -293,6 +385,11 @@ export default function ProjectBoard() {
                   }
                   return null;
                 };
+
+                const pending = () =>
+                  detail().status === "waiting_input"
+                    ? pendingRequest(detail().events)
+                    : null;
 
                 return (
                   <div class="flex-1 overflow-y-auto flex flex-col min-h-0">
@@ -335,6 +432,117 @@ export default function ProjectBoard() {
                       </div>
                     </div>
 
+                    {/* ── Respond panel (waiting_input) ──────────── */}
+                    <Show when={detail().status === "waiting_input"}>
+                      <div class="px-6 py-4 border-b border-amber-900/40 bg-amber-950/20 flex-shrink-0">
+                        <Show
+                          when={pending()}
+                          fallback={
+                            /* Agent replied with plain-text follow-up (no structured question tool) */
+                            <div class="space-y-3">
+                              <span class="text-xs font-semibold text-amber-400 uppercase tracking-wide">Agent is waiting for your reply</span>
+                              <textarea
+                                class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-amber-500 resize-none placeholder-gray-600"
+                                rows={3}
+                                placeholder="Type your reply…"
+                                value={replyText()}
+                                onInput={(e) => setReplyText(e.currentTarget.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replyText().trim()) {
+                                    void respondJob(detail().id, "message", replyText());
+                                  }
+                                }}
+                              />
+                              <button
+                                disabled={responding() || !replyText().trim()}
+                                onClick={() => respondJob(detail().id, "message", replyText())}
+                                class="w-full py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-40 rounded text-sm font-medium transition-colors"
+                              >
+                                {responding() ? "Sending…" : "Send Reply"}
+                              </button>
+                              <p class="text-xs text-gray-600 text-center">⌘↵ / Ctrl+↵ to send</p>
+                            </div>
+                          }
+                        >
+                          {(req) => (
+                            <>
+                              {/* Permission request */}
+                              <Show when={req().kind === "permission"}>
+                                <div class="space-y-3">
+                                  <div class="flex items-center gap-2">
+                                    <span class="text-xs font-semibold text-amber-400 uppercase tracking-wide">Permission Required</span>
+                                    <Show when={req().permissionType}>
+                                      <span class="text-xs font-mono bg-amber-900/40 text-amber-300 px-2 py-0.5 rounded">{req().permissionType}</span>
+                                    </Show>
+                                  </div>
+                                  <Show when={req().title}>
+                                    <p class="text-sm text-gray-200 bg-gray-800/60 rounded px-3 py-2 font-mono leading-relaxed whitespace-pre-wrap">{req().title}</p>
+                                  </Show>
+                                  <Show when={req().metadata && Object.keys(req().metadata!).length > 0}>
+                                    <details class="group">
+                                      <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300 list-none flex items-center gap-1">
+                                        <span class="group-open:rotate-90 transition-transform inline-block">▶</span>
+                                        Details
+                                      </summary>
+                                      <pre class="mt-2 text-xs text-gray-500 bg-gray-900/80 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap border border-gray-800">
+                                        {JSON.stringify(req().metadata, null, 2)}
+                                      </pre>
+                                    </details>
+                                  </Show>
+                                  <div class="flex gap-2 pt-1">
+                                    <button
+                                      disabled={responding()}
+                                      onClick={() => respondJob(detail().id, "approve")}
+                                      class="flex-1 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 rounded text-sm font-medium transition-colors"
+                                    >
+                                      {responding() ? "…" : "Allow"}
+                                    </button>
+                                    <button
+                                      disabled={responding()}
+                                      onClick={() => respondJob(detail().id, "deny")}
+                                      class="flex-1 py-2 bg-red-900/60 hover:bg-red-800/60 disabled:opacity-40 rounded text-sm font-medium text-red-300 transition-colors"
+                                    >
+                                      {responding() ? "…" : "Deny"}
+                                    </button>
+                                  </div>
+                                </div>
+                              </Show>
+
+                              {/* Agent question */}
+                              <Show when={req().kind === "question"}>
+                                <div class="space-y-3">
+                                  <span class="text-xs font-semibold text-amber-400 uppercase tracking-wide">Agent is waiting for your reply</span>
+                                  <Show when={req().question}>
+                                    <p class="text-sm text-gray-200 bg-gray-800/60 rounded px-3 py-2 whitespace-pre-wrap leading-relaxed">{req().question}</p>
+                                  </Show>
+                                  <textarea
+                                    class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-amber-500 resize-none placeholder-gray-600"
+                                    rows={3}
+                                    placeholder="Type your reply…"
+                                    value={replyText()}
+                                    onInput={(e) => setReplyText(e.currentTarget.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replyText().trim()) {
+                                        void respondJob(detail().id, "message", replyText());
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    disabled={responding() || !replyText().trim()}
+                                    onClick={() => respondJob(detail().id, "message", replyText())}
+                                    class="w-full py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-40 rounded text-sm font-medium transition-colors"
+                                  >
+                                    {responding() ? "Sending…" : "Send Reply"}
+                                  </button>
+                                  <p class="text-xs text-gray-600 text-center">⌘↵ / Ctrl+↵ to send</p>
+                                </div>
+                              </Show>
+                            </>
+                          )}
+                        </Show>
+                      </div>
+                    </Show>
+
                     {/* Conversation */}
                     <div class="flex-1 overflow-y-auto px-6 py-4 space-y-3">
                       <Show
@@ -344,12 +552,10 @@ export default function ProjectBoard() {
                         <For each={detail().conversation}>
                           {(msg) => (
                             <div class={`space-y-2 ${msg.role === "user" ? "pl-4" : ""}`}>
-                              {/* Role badge */}
                               <p class={`text-xs font-semibold ${msg.role === "user" ? "text-blue-400" : "text-emerald-400"}`}>
                                 {msg.role === "user" ? "You" : `Agent${msg.model ? ` · ${msg.model}` : ""}`}
                               </p>
 
-                              {/* Parts */}
                               <For each={msg.parts.filter(p => p.type === "text" || p.type === "reasoning" || p.type === "tool-call" || p.type === "tool-result")}>
                                 {(part) => (
                                   <Show when={part.type === "text" && part.text}>
@@ -364,7 +570,6 @@ export default function ProjectBoard() {
                                 )}
                               </For>
 
-                              {/* Reasoning (collapsible) */}
                               <For each={msg.parts.filter(p => p.type === "reasoning" && p.text)}>
                                 {(part) => (
                                   <details class="group">
@@ -377,7 +582,6 @@ export default function ProjectBoard() {
                                 )}
                               </For>
 
-                              {/* Tool calls */}
                               <For each={msg.parts.filter(p => p.type === "tool-call")}>
                                 {(part) => (
                                   <div class="text-xs bg-amber-900/20 border border-amber-800/30 rounded px-3 py-2">
@@ -405,7 +609,8 @@ export default function ProjectBoard() {
                                   <span class={`font-mono shrink-0 ${
                                     ev.eventType === "failed" || ev.eventType === "error" ? "text-red-400" :
                                     ev.eventType === "completed" ? "text-emerald-400" :
-                                    ev.eventType.startsWith("ollama") ? "text-amber-400" :
+                                    ev.eventType === "permission_requested" || ev.eventType === "agent_question" ? "text-amber-400" :
+                                    ev.eventType === "user_response" ? "text-blue-400" :
                                     "text-gray-400"
                                   }`}>
                                     {ev.eventType}
@@ -437,7 +642,6 @@ export default function ProjectBoard() {
           <div class="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg mx-4 p-6 space-y-4">
             <h2 class="text-lg font-semibold">New Task</h2>
 
-            {/* Playbook selector */}
             <div>
               <label class="text-xs text-gray-400 block mb-1.5">Playbook *</label>
               <Show
@@ -489,7 +693,6 @@ export default function ProjectBoard() {
               </Show>
             </div>
 
-            {/* Prompt */}
             <div>
               <label class="text-xs text-gray-400 block mb-1.5">Task prompt *</label>
               <textarea
@@ -546,7 +749,11 @@ function JobCard(props: {
 
   return (
     <div
-      class="bg-gray-800/80 border border-gray-700/60 rounded-lg p-3 space-y-2 group cursor-pointer hover:border-gray-600 transition-colors"
+      class={`border rounded-lg p-3 space-y-2 group cursor-pointer transition-colors ${
+        props.job.status === "waiting_input"
+          ? "bg-amber-950/30 border-amber-800/50 hover:border-amber-700"
+          : "bg-gray-800/80 border-gray-700/60 hover:border-gray-600"
+      }`}
       onClick={props.onClick}
     >
       <p class="text-sm leading-snug line-clamp-3 text-gray-200">{props.job.prompt}</p>
@@ -555,15 +762,10 @@ function JobCard(props: {
         <div class="flex items-center gap-1.5 min-w-0">
           <Show when={props.playbookName}>
             <span class="text-xs text-gray-500 truncate">{props.playbookName}</span>
-            <Show when={props.playbookProfile}>
-              <span class={`text-xs ${props.profileColor[props.playbookProfile!] ?? "text-gray-500"}`}>
-                ·
-              </span>
-            </Show>
           </Show>
         </div>
         <span class={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${statusColor[props.job.status] ?? "bg-gray-700 text-gray-400"}`}>
-          {props.job.status}
+          {props.job.status === "waiting_input" ? "blocked" : props.job.status}
         </span>
       </div>
 
