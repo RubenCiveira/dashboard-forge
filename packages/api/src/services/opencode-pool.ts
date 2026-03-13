@@ -144,6 +144,16 @@ export async function acquireServer(
   return creation;
 }
 
+/** Returns the PID of the server process for a given playbook+model, or null if not in pool. */
+export function getServerPid(playbookId: string, model?: string | null): number | null {
+  return pool.get(poolKey(playbookId, model))?.proc.pid ?? null;
+}
+
+/** Returns the port of the server for a given playbook+model, or null if not in pool. */
+export function getServerPort(playbookId: string, model?: string | null): number | null {
+  return pool.get(poolKey(playbookId, model))?.port ?? null;
+}
+
 /**
  * Updates the last-used timestamp for a server.
  * Call after each job session completes so the TTL clock resets.

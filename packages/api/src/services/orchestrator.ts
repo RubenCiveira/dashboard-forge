@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { eventBus } from "../lib/events.js";
-import { acquireServer, touchServer } from "./opencode-pool.js";
+import { acquireServer, getServerPid, touchServer } from "./opencode-pool.js";
 import { getOpenCodeSession } from "./opencode-session.js";
 import { JOB_STATUS, SSE_EVENT } from "@agentforge/shared";
 import { createOpencodeClient } from "@opencode-ai/sdk";
@@ -77,6 +77,193 @@ async function logJobEvent(
   });
 }
 
+// ─── Shared event loop ───────────────────────────────────────────────────────
+
+interface EventLoopParams {
+  jobId: string;
+  client: ReturnType<typeof createOpencodeClient>;
+  sessionId: string;
+  cwd: string;
+  playbookId: string | null | undefined;
+  model: string | null;
+  sub: AsyncIterable<unknown>;
+  /** Set to true when we know the agent has already used the question tool
+   *  (e.g. when reconnecting mid-conversation). Enables stricter completion
+   *  gating so a follow-up plain-text response doesn't prematurely complete the job. */
+  hasQuestions?: boolean;
+}
+
+/**
+ * Drives the event loop for an OpenCode session until it completes, fails,
+ * or is cancelled. Shared between fresh executions and reconnected sessions.
+ */
+async function runEventLoop({
+  jobId,
+  client,
+  sessionId,
+  cwd,
+  playbookId,
+  model,
+  sub,
+  hasQuestions: initialHasQuestions = false,
+}: EventLoopParams): Promise<void> {
+  let hasQuestions = initialHasQuestions;
+
+  for await (const raw of sub) {
+    const event = raw as { type: string; properties: Record<string, unknown> };
+    if (!event?.type) continue;
+
+    const props = event.properties as Record<string, unknown> & { sessionID?: string };
+    if (props.sessionID && props.sessionID !== sessionId) continue; // skip other sessions
+
+    // ── Agent asked a question (question tool) ─────────────────────────
+    if (event.type === "question.asked") {
+      hasQuestions = true;
+      type QuestionPayload = {
+        id: string;
+        questions: Array<{ question: string; header?: string; options?: Array<{ label: string; description?: string }> }>;
+      };
+      const q = props as unknown as QuestionPayload;
+      pendingQuestions.set(jobId, { id: q.id, questions: q.questions });
+
+      await db
+        .update(schema.jobs)
+        .set({ status: JOB_STATUS.WAITING_INPUT })
+        .where(eq(schema.jobs.id, jobId));
+
+      const questionText = q.questions.map((qu) => qu.question).join("\n");
+      eventBus.emit({
+        type: SSE_EVENT.JOB_WAITING,
+        data: { jobId, question: questionText.slice(0, 500) },
+      });
+      await logJobEvent(jobId, "agent_question", {
+        questionId: q.id,
+        question: questionText.slice(0, 1000),
+      });
+      continue;
+    }
+
+    // ── Permission requested ───────────────────────────────────────────
+    if (event.type === "permission.updated") {
+      const permission = props as unknown as Permission;
+      pendingPermissions.set(jobId, permission);
+
+      await db
+        .update(schema.jobs)
+        .set({ status: JOB_STATUS.WAITING_INPUT })
+        .where(eq(schema.jobs.id, jobId));
+
+      eventBus.emit({
+        type: SSE_EVENT.JOB_WAITING,
+        data: {
+          jobId,
+          permissionId: permission.id,
+          permissionType: permission.type,
+          title: permission.title,
+          metadata: permission.metadata,
+        },
+      });
+      await logJobEvent(jobId, "permission_requested", {
+        permissionId: permission.id,
+        type: permission.type,
+        title: permission.title,
+      });
+      continue;
+    }
+
+    // ── Session idle / status:idle — session has finished processing ───
+    type StatusProps = { status?: { type?: string } };
+    const isSessionIdle =
+      event.type === "session.idle" ||
+      (event.type === "session.status" &&
+        (props as StatusProps).status?.type === "idle");
+
+    if (isSessionIdle) {
+      const currentJob = await db
+        .select()
+        .from(schema.jobs)
+        .where(eq(schema.jobs.id, jobId))
+        .get();
+
+      if (currentJob?.status === JOB_STATUS.CANCELLED) break;
+
+      const sessionData = await client.session.get({
+        path: { id: sessionId },
+        query: { directory: cwd },
+      });
+      type SessionSummary = { summary?: { title?: string; body?: string } };
+      const rawSummary =
+        (sessionData.data as SessionSummary)?.summary?.body ??
+        (sessionData.data as SessionSummary)?.summary?.title ??
+        null;
+
+      // In conversational mode (agent used the `question` tool at least once),
+      // only complete once the agent explicitly signals it is done via <<TASK_DONE>>.
+      if (hasQuestions && !rawSummary) {
+        const conversation = getOpenCodeSession(sessionId);
+        const lastAssistantMsg = [...conversation].reverse().find((m) => m.role === "assistant");
+        const taskDone = lastAssistantMsg?.parts.some(
+          (p) => p.type === "text" && (p.text ?? "").includes("<<TASK_DONE>>"),
+        ) ?? false;
+
+        if (!taskDone) {
+          if (currentJob?.status !== JOB_STATUS.WAITING_INPUT) {
+            await db
+              .update(schema.jobs)
+              .set({ status: JOB_STATUS.WAITING_INPUT })
+              .where(eq(schema.jobs.id, jobId));
+            eventBus.emit({ type: SSE_EVENT.JOB_WAITING, data: { jobId } });
+          }
+          continue;
+        }
+      }
+
+      const summary = rawSummary ?? "Session completed";
+
+      await db
+        .update(schema.jobs)
+        .set({
+          status: JOB_STATUS.COMPLETED,
+          summary,
+          completedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.jobs.id, jobId));
+
+      eventBus.emit({
+        type: SSE_EVENT.JOB_COMPLETED,
+        data: { jobId, summary: summary.slice(0, 500) },
+      });
+      await logJobEvent(jobId, "completed", { summary: summary.slice(0, 1000) });
+
+      touchServer(playbookId!, model);
+      break;
+    }
+
+    // ── Session error ──────────────────────────────────────────────────
+    if (event.type === "session.error") {
+      const errJob = await db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
+      if (errJob?.status === JOB_STATUS.WAITING_INPUT) continue;
+
+      type SessionError = { error?: { data?: { message?: string } } };
+      const errMsg =
+        (props as SessionError).error?.data?.message ?? "Unknown session error";
+
+      await db
+        .update(schema.jobs)
+        .set({
+          status: JOB_STATUS.FAILED,
+          summary: errMsg,
+          completedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.jobs.id, jobId));
+
+      eventBus.emit({ type: SSE_EVENT.JOB_FAILED, data: { jobId, error: errMsg } });
+      await logJobEvent(jobId, "failed", { error: errMsg });
+      break;
+    }
+  }
+}
+
 // ─── Core execution ──────────────────────────────────────────────────────────
 
 /**
@@ -115,12 +302,19 @@ export async function executeJob(jobId: string): Promise<void> {
     const baseUrl = `http://127.0.0.1:${port}`;
     const client = createOpencodeClient({ baseUrl });
 
-    // 3. Working directory
+    // 3. Persist PID + port so the job can be reconnected after a restart
+    const pid = getServerPid(job.playbookId!, model);
+    await db
+      .update(schema.jobs)
+      .set({ pid, serverPort: port })
+      .where(eq(schema.jobs.id, jobId));
+
+    // 4. Working directory
     const cwd = project.sourceType === "local"
       ? project.sourcePath
       : `data/workspaces/${project.id}`;
 
-    // 4. Create OpenCode session for this project directory
+    // 5. Create OpenCode session for this project directory
     const sessionRes = await client.session.create({ query: { directory: cwd } });
     const sessionId = (sessionRes.data as { id: string }).id;
 
@@ -131,21 +325,17 @@ export async function executeJob(jobId: string): Promise<void> {
       .where(eq(schema.jobs.id, jobId));
     activeSessions.set(jobId, { client, sessionId, directory: cwd, baseUrl });
 
-    // 5. Build prompt
+    // 6. Build prompt
     let fullPrompt = job.prompt;
     if (job.contextFrom) {
       fullPrompt = `## Context from previous step\n${job.contextFrom}\n\n## Your task\n${job.prompt}`;
     }
-    // Append a completion signal instruction. The orchestrator watches for
-    // <<TASK_DONE>> in the conversation to know when the agent has finished
-    // doing real work (as opposed to just asking a follow-up question).
     fullPrompt += "\n\n---\nIMPORTANT: When you have fully completed all requested changes (written all files, made all edits, run all commands), you MUST end your final response with exactly: <<TASK_DONE>>";
 
-    // 6. Subscribe BEFORE sending the prompt — avoids a race where session.idle
-    //    fires before we start listening and the job stalls in RUNNING forever.
+    // 7. Subscribe BEFORE sending the prompt
     const sub = await client.event.subscribe({ query: { directory: cwd } });
 
-    // 7. Send prompt — returns immediately, session starts working
+    // 8. Send prompt
     const parsedModel = model ? parseModel(model) : undefined;
     await client.session.promptAsync({
       path: { id: sessionId },
@@ -160,180 +350,7 @@ export async function executeJob(jobId: string): Promise<void> {
     console.log(`[job ${jobId}] Session ${sessionId} started on ${baseUrl}`);
     await logJobEvent(jobId, "session_started", { sessionId, baseUrl, cwd });
 
-    // True once the agent has used the `question` tool at least once.
-    // When set, idle events without a session summary re-park the job in
-    // WAITING_INPUT so the user can answer follow-up plain-text questions.
-    let hasQuestions = false;
-
-    for await (const raw of sub.stream) {
-      const event = raw as { type: string; properties: Record<string, unknown> };
-      if (!event?.type) continue;
-
-      const props = event.properties as Record<string, unknown> & { sessionID?: string };
-      if (props.sessionID && props.sessionID !== sessionId) continue; // skip other sessions
-
-      // ── Agent asked a question (question tool) ─────────────────────────
-      if (event.type === "question.asked") {
-        hasQuestions = true; // enable summary-gated completion for this job
-        type QuestionPayload = {
-          id: string;
-          questions: Array<{ question: string; header?: string; options?: Array<{ label: string; description?: string }> }>;
-        };
-        const q = props as unknown as QuestionPayload;
-        pendingQuestions.set(jobId, { id: q.id, questions: q.questions });
-
-        await db
-          .update(schema.jobs)
-          .set({ status: JOB_STATUS.WAITING_INPUT })
-          .where(eq(schema.jobs.id, jobId));
-
-        const questionText = q.questions.map((qu) => qu.question).join("\n");
-        eventBus.emit({
-          type: SSE_EVENT.JOB_WAITING,
-          data: { jobId, question: questionText.slice(0, 500) },
-        });
-        await logJobEvent(jobId, "agent_question", {
-          questionId: q.id,
-          question: questionText.slice(0, 1000),
-        });
-        continue; // keep the loop alive — respondToJob("message") will resume
-      }
-
-      // ── Permission requested ───────────────────────────────────────────
-      if (event.type === "permission.updated") {
-        const permission = props as unknown as Permission;
-        pendingPermissions.set(jobId, permission);
-
-        await db
-          .update(schema.jobs)
-          .set({ status: JOB_STATUS.WAITING_INPUT })
-          .where(eq(schema.jobs.id, jobId));
-
-        eventBus.emit({
-          type: SSE_EVENT.JOB_WAITING,
-          data: {
-            jobId,
-            permissionId: permission.id,
-            permissionType: permission.type,
-            title: permission.title,
-            metadata: permission.metadata,
-          },
-        });
-        await logJobEvent(jobId, "permission_requested", {
-          permissionId: permission.id,
-          type: permission.type,
-          title: permission.title,
-        });
-        continue;
-      }
-
-      // ── Session idle / status:idle — session has finished processing ───
-      //    OpenCode emits either `session.idle` (older) or
-      //    `session.status { status: { type: "idle" } }` (current).
-      type StatusProps = { status?: { type?: string } };
-      const isSessionIdle =
-        event.type === "session.idle" ||
-        (event.type === "session.status" &&
-          (props as StatusProps).status?.type === "idle");
-
-      if (isSessionIdle) {
-        const currentJob = await db
-          .select()
-          .from(schema.jobs)
-          .where(eq(schema.jobs.id, jobId))
-          .get();
-
-        // Job was cancelled externally — stop and free the slot.
-        if (currentJob?.status === JOB_STATUS.CANCELLED) break;
-
-        // Fetch the session data to check for a completion summary.
-        const sessionData = await client.session.get({
-          path: { id: sessionId },
-          query: { directory: cwd },
-        });
-        type SessionSummary = { summary?: { title?: string; body?: string } };
-        const rawSummary =
-          (sessionData.data as SessionSummary)?.summary?.body ??
-          (sessionData.data as SessionSummary)?.summary?.title ??
-          null;
-
-        // In conversational mode (agent used the `question` tool at least once),
-        // only complete once the agent explicitly signals it is done by including
-        // <<TASK_DONE>> in its last message. This is injected into every prompt
-        // so the agent knows to output it when all work is finished.
-        //
-        // Without this gate the orchestrator cannot distinguish "agent replied
-        // with a follow-up question" from "agent completed the task" because
-        // OpenCode fires the same session.idle event in both cases and does not
-        // always generate a session summary.
-        if (hasQuestions && !rawSummary) {
-          const conversation = getOpenCodeSession(sessionId);
-          const lastAssistantMsg = [...conversation].reverse().find((m) => m.role === "assistant");
-          const taskDone = lastAssistantMsg?.parts.some(
-            (p) => p.type === "text" && (p.text ?? "").includes("<<TASK_DONE>>"),
-          ) ?? false;
-
-          if (!taskDone) {
-            // Agent hasn't signalled completion — re-park so the user can respond.
-            if (currentJob?.status !== JOB_STATUS.WAITING_INPUT) {
-              await db
-                .update(schema.jobs)
-                .set({ status: JOB_STATUS.WAITING_INPUT })
-                .where(eq(schema.jobs.id, jobId));
-              eventBus.emit({ type: SSE_EVENT.JOB_WAITING, data: { jobId } });
-            }
-            continue;
-          }
-          // <<TASK_DONE>> found → fall through to normal completion below.
-        }
-
-        const summary = rawSummary ?? "Session completed";
-
-        await db
-          .update(schema.jobs)
-          .set({
-            status: JOB_STATUS.COMPLETED,
-            summary,
-            completedAt: new Date().toISOString(),
-          })
-          .where(eq(schema.jobs.id, jobId));
-
-        eventBus.emit({
-          type: SSE_EVENT.JOB_COMPLETED,
-          data: { jobId, summary: summary.slice(0, 500) },
-        });
-        await logJobEvent(jobId, "completed", { summary: summary.slice(0, 1000) });
-
-        touchServer(job.playbookId!, model);
-        break;
-      }
-
-      // ── Session error ──────────────────────────────────────────────────
-      if (event.type === "session.error") {
-        // An error during WAITING_INPUT is the abort we triggered to unblock
-        // the question tool — ignore it, the event loop stays alive and will
-        // receive new events from the re-sent prompt.
-        const errJob = await db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
-        if (errJob?.status === JOB_STATUS.WAITING_INPUT) continue;
-
-        type SessionError = { error?: { data?: { message?: string } } };
-        const errMsg =
-          (props as SessionError).error?.data?.message ?? "Unknown session error";
-
-        await db
-          .update(schema.jobs)
-          .set({
-            status: JOB_STATUS.FAILED,
-            summary: errMsg,
-            completedAt: new Date().toISOString(),
-          })
-          .where(eq(schema.jobs.id, jobId));
-
-        eventBus.emit({ type: SSE_EVENT.JOB_FAILED, data: { jobId, error: errMsg } });
-        await logJobEvent(jobId, "failed", { error: errMsg });
-        break;
-      }
-    }
+    await runEventLoop({ jobId, client, sessionId, cwd, playbookId: job.playbookId, model, sub: sub.stream });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
@@ -355,6 +372,124 @@ export async function executeJob(jobId: string): Promise<void> {
   }
 }
 
+// ─── Restart recovery ────────────────────────────────────────────────────────
+
+/**
+ * Re-attaches to an OpenCode server that is still running after an API restart.
+ * Re-subscribes to the existing session's SSE stream and resumes the event loop.
+ * Throws if the server is not reachable (caller should fall back to resumeJobWithHistory).
+ */
+export async function reconnectJob(job: typeof schema.jobs.$inferSelect): Promise<void> {
+  const port = job.serverPort;
+  if (!port) throw new Error(`Job ${job.id} has no saved server port`);
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  // Verify the server is still alive
+  const alive = await fetch(`${baseUrl}/session`, { signal: AbortSignal.timeout(2000) })
+    .then((r) => r.ok)
+    .catch(() => false);
+  if (!alive) throw new Error(`Server at port ${port} is not responding`);
+
+  const project = await db
+    .select()
+    .from(schema.projects)
+    .where(eq(schema.projects.id, job.projectId))
+    .get();
+  if (!project) throw new Error(`Project ${job.projectId} not found`);
+
+  const cwd = project.sourceType === "local"
+    ? project.sourcePath
+    : `data/workspaces/${project.id}`;
+
+  const client = createOpencodeClient({ baseUrl });
+  const sessionId = job.sessionId!;
+  const model = await resolveModel(job.modelOverride);
+
+  activeSessions.set(job.id, { client, sessionId, directory: cwd, baseUrl });
+
+  await db
+    .update(schema.jobs)
+    .set({ status: JOB_STATUS.RUNNING })
+    .where(eq(schema.jobs.id, job.id));
+  eventBus.emit({ type: SSE_EVENT.JOB_STARTED, data: { jobId: job.id, status: JOB_STATUS.RUNNING } });
+
+  const sub = await client.event.subscribe({ query: { directory: cwd } });
+  await logJobEvent(job.id, "session_reconnected", { sessionId, baseUrl, cwd, port });
+  console.log(`[job ${job.id}] Reconnected to session ${sessionId} on ${baseUrl}`);
+
+  try {
+    await runEventLoop({
+      jobId: job.id,
+      client,
+      sessionId,
+      cwd,
+      playbookId: job.playbookId,
+      model,
+      sub: sub.stream,
+      hasQuestions: true, // conservative: prevents premature completion on first idle
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await db
+      .update(schema.jobs)
+      .set({ status: JOB_STATUS.FAILED, summary: message, completedAt: new Date().toISOString() })
+      .where(eq(schema.jobs.id, job.id));
+    eventBus.emit({ type: SSE_EVENT.JOB_FAILED, data: { jobId: job.id, error: message } });
+    await logJobEvent(job.id, "error", { message });
+  } finally {
+    activeSessions.delete(job.id);
+    pendingPermissions.delete(job.id);
+    pendingQuestions.delete(job.id);
+  }
+}
+
+/**
+ * Resets a job to PENDING and injects the previous conversation as context,
+ * so the next `executeJob` call resumes from where the interrupted session left off.
+ *
+ * Call this when the OpenCode server process is dead but the session history
+ * is still readable from OpenCode's local SQLite database.
+ */
+export async function resumeJobWithHistory(job: typeof schema.jobs.$inferSelect): Promise<void> {
+  const conversation = job.sessionId ? getOpenCodeSession(job.sessionId) : [];
+
+  let history = "";
+  if (conversation.length > 0) {
+    history = "## Conversation history from previous session\n\n";
+    for (const msg of conversation) {
+      const role = msg.role === "assistant" ? "Assistant" : "User";
+      const texts = msg.parts
+        .filter((p) => p.type === "text" && p.text?.trim())
+        .map((p) => p.text!)
+        .join("\n");
+      if (texts) history += `**${role}:**\n${texts}\n\n`;
+    }
+    history +=
+      "---\n\nThe session was interrupted (server restart). Continue where you left off based on the conversation above.";
+  }
+
+  // Merge with any existing contextFrom (e.g. context from a parent job)
+  const contextFrom = job.contextFrom
+    ? `${job.contextFrom}\n\n---\n\n${history}`
+    : history || null;
+
+  await db
+    .update(schema.jobs)
+    .set({
+      status: JOB_STATUS.PENDING,
+      contextFrom,
+      sessionId: null,
+      pid: null,
+      serverPort: null,
+    })
+    .where(eq(schema.jobs.id, job.id));
+
+  console.log(
+    `[orchestrator] Job ${job.id} reset to PENDING with ${conversation.length} history messages`,
+  );
+}
+
 // ─── Human-in-the-loop ───────────────────────────────────────────────────────
 
 /**
@@ -363,6 +498,7 @@ export async function executeJob(jobId: string): Promise<void> {
  * - `approve`: resolves a pending permission as "once" (allow this time).
  * - `deny`: resolves a pending permission as "reject".
  * - `message`: sends a follow-up prompt to the running session.
+ * - `complete`: manually closes a job as completed (fallback for tasks with no summary).
  */
 export async function respondToJob(
   jobId: string,
@@ -372,8 +508,6 @@ export async function respondToJob(
   const session = activeSessions.get(jobId);
   if (!session) throw new Error(`No active session for job ${jobId}`);
 
-  // Explicit close: user marks the job done from the UI (fallback for tasks
-  // where the agent completes without tool calls and no summary is generated).
   if (action === "complete") {
     await db
       .update(schema.jobs)
@@ -404,7 +538,6 @@ export async function respondToJob(
 
     const pq = pendingQuestions.get(jobId);
 
-    // Always log the user's response as a job event so it's visible in the UI.
     await logJobEvent(jobId, "user_response", {
       message: message.slice(0, 1000),
       ...(pq ? { questionId: pq.id } : {}),
@@ -413,22 +546,12 @@ export async function respondToJob(
     if (pq) {
       pendingQuestions.delete(jobId);
 
-      // OpenCode's `question` tool in headless server mode has no dedicated
-      // answer endpoint — the TUI control queue is not populated (confirmed by
-      // control.next timeout). The session is "busy" with the tool blocking it,
-      // so we cannot inject a new message directly.
-      //
-      // Solution: abort the current (blocked) run, then re-send the user's
-      // answer as the next user turn. The conversation history is preserved, so
-      // the agent sees its own question followed by the user's reply and
-      // continues naturally without losing context.
       console.log(`[job ${jobId}] aborting blocked session to unblock question tool`);
       await session.client.session.abort({
         path: { id: session.sessionId },
         query: { directory: session.directory },
       });
 
-      // Brief pause so the abort settles before we enqueue the answer.
       await new Promise((r) => setTimeout(r, 500));
 
       console.log(`[job ${jobId}] sending user answer via promptAsync after abort`);
@@ -438,7 +561,6 @@ export async function respondToJob(
         body: { parts: [{ type: "text", text: message }] },
       });
     } else {
-      // No pending question — send a regular follow-up message to the session.
       await session.client.session.promptAsync({
         path: { id: session.sessionId },
         query: { directory: session.directory },
@@ -447,9 +569,6 @@ export async function respondToJob(
     }
   }
 
-  // Resume the job as RUNNING — the idle handler in executeJob will re-park it
-  // in WAITING_INPUT if the agent goes idle without a session summary (meaning
-  // it replied with a plain-text follow-up that the user still needs to answer).
   await db
     .update(schema.jobs)
     .set({ status: JOB_STATUS.RUNNING })

@@ -5,22 +5,37 @@
  * maxConcurrent is read from the first active runner's config on every tick,
  * so changes take effect without restarting the server.
  *
- * On startup, any job left in RUNNING state whose PID is no longer alive is
- * marked FAILED (the opencode process was killed when the server restarted).
+ * On startup, any job left in RUNNING or WAITING_INPUT state is recovered:
+ * - RUNNING + server still alive on saved port → reconnected to existing session.
+ * - RUNNING/WAITING_INPUT + server dead but session history available → reset to
+ *   PENDING with history injected as context so it resumes on the next tick.
+ * - Otherwise → marked FAILED.
  */
 
 import { eq, asc } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { JOB_STATUS } from "@agentforge/shared";
-import { executeJob } from "./orchestrator.js";
+import { executeJob, reconnectJob, resumeJobWithHistory } from "./orchestrator.js";
+
+/** Checks whether an OpenCode server at the given port is reachable. */
+async function isServerAlive(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/session`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 /**
- * On startup, find jobs left in RUNNING state.
- * If their PID is no longer alive, mark them FAILED.
+ * On startup, find jobs left in RUNNING or WAITING_INPUT state.
+ * - RUNNING + alive server → reconnect to existing session.
+ * - RUNNING/WAITING_INPUT + dead server + has sessionId → resume with history.
+ * - Otherwise → mark FAILED.
  */
 async function recoverStaleJobs(): Promise<void> {
-  // Jobs left in RUNNING or WAITING_INPUT after a restart have lost their
-  // in-memory OpenCode session and can never complete — mark them failed.
   const staleStatuses = [JOB_STATUS.RUNNING, JOB_STATUS.WAITING_INPUT] as const;
 
   for (const status of staleStatuses) {
@@ -30,17 +45,56 @@ async function recoverStaleJobs(): Promise<void> {
       .where(eq(schema.jobs.status, status));
 
     for (const job of stale) {
-      await db
-        .update(schema.jobs)
-        .set({
-          status:      JOB_STATUS.FAILED,
-          summary:     `Session lost (server restart while job was ${status})`,
-          completedAt: new Date().toISOString(),
-          pid:         null,
-        })
-        .where(eq(schema.jobs.id, job.id));
+      // RUNNING jobs: check if the server process is still alive
+      if (status === JOB_STATUS.RUNNING && job.serverPort) {
+        const alive = await isServerAlive(job.serverPort);
+        if (alive) {
+          console.log(`[dispatcher] Reconnecting job ${job.id} to server on :${job.serverPort}`);
+          reconnectJob(job).catch(async (err: unknown) => {
+            console.error(`[dispatcher] Reconnect failed for job ${job.id}:`, err);
+            // Server died between the liveness check and reconnect — try history replay
+            if (job.sessionId) {
+              resumeJobWithHistory(job).catch((e: unknown) => {
+                console.error(`[dispatcher] Resume also failed for job ${job.id}:`, e);
+                db.update(schema.jobs)
+                  .set({ status: JOB_STATUS.FAILED, summary: "Failed to reconnect or resume", completedAt: new Date().toISOString() })
+                  .where(eq(schema.jobs.id, job.id))
+                  .catch(() => {});
+              });
+            } else {
+              await db
+                .update(schema.jobs)
+                .set({ status: JOB_STATUS.FAILED, summary: "Reconnect failed (no session)", completedAt: new Date().toISOString(), pid: null, serverPort: null })
+                .where(eq(schema.jobs.id, job.id));
+            }
+          });
+          continue;
+        }
+      }
 
-      console.log(`[dispatcher] Stale job ${job.id} (${status}) marked as failed`);
+      // Server dead (or WAITING_INPUT): try history-based resume
+      if (job.sessionId) {
+        console.log(`[dispatcher] Resuming job ${job.id} with conversation history`);
+        await resumeJobWithHistory(job).catch(async (err: unknown) => {
+          console.error(`[dispatcher] Resume failed for job ${job.id}:`, err);
+          await db
+            .update(schema.jobs)
+            .set({ status: JOB_STATUS.FAILED, summary: "Failed to resume with history", completedAt: new Date().toISOString(), pid: null, serverPort: null })
+            .where(eq(schema.jobs.id, job.id));
+        });
+      } else {
+        await db
+          .update(schema.jobs)
+          .set({
+            status: JOB_STATUS.FAILED,
+            summary: `Session lost (server restart while job was ${status})`,
+            completedAt: new Date().toISOString(),
+            pid: null,
+            serverPort: null,
+          })
+          .where(eq(schema.jobs.id, job.id));
+        console.log(`[dispatcher] Stale job ${job.id} (${status}) marked as failed`);
+      }
     }
   }
 }

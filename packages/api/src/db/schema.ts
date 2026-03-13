@@ -91,6 +91,7 @@ export const jobs = sqliteTable("jobs", {
   contextFrom: text("context_from"),
   sessionId: text("session_id"),
   pid: integer("pid"),
+  serverPort: integer("server_port"),
   summary: text("summary"),
   cost: text("cost"),
   startedAt: text("started_at"),

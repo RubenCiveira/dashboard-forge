@@ -112,6 +112,10 @@ try {
 try {
   sqlite.run("ALTER TABLE jobs ADD COLUMN pid INTEGER");
 } catch { /* already exists */ }
+// Safety net: ensure server_port column exists
+try {
+  sqlite.run("ALTER TABLE jobs ADD COLUMN server_port INTEGER");
+} catch { /* already exists */ }
 console.log("✓ Migrations applied");
 
 // Seed default OpenCode runner if none exists
