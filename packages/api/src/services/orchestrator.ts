@@ -155,6 +155,11 @@ export async function executeJob(jobId: string): Promise<void> {
     console.log(`[job ${jobId}] Session ${sessionId} started on ${baseUrl}`);
     await logJobEvent(jobId, "session_started", { sessionId, baseUrl, cwd });
 
+    // True once the agent has used the `question` tool at least once.
+    // When set, idle events without a session summary re-park the job in
+    // WAITING_INPUT so the user can answer follow-up plain-text questions.
+    let hasQuestions = false;
+
     for await (const raw of sub.stream) {
       const event = raw as { type: string; properties: Record<string, unknown> };
       if (!event?.type) continue;
@@ -164,6 +169,7 @@ export async function executeJob(jobId: string): Promise<void> {
 
       // ── Agent asked a question (question tool) ─────────────────────────
       if (event.type === "question.asked") {
+        hasQuestions = true; // enable summary-gated completion for this job
         type QuestionPayload = {
           id: string;
           questions: Array<{ question: string; header?: string; options?: Array<{ label: string; description?: string }> }>;
@@ -246,10 +252,20 @@ export async function executeJob(jobId: string): Promise<void> {
           (sessionData.data as SessionSummary)?.summary?.title ??
           null;
 
-        // If the job is still WAITING_INPUT and the agent hasn't produced a
-        // final summary, it replied with a plain-text follow-up question.
-        // Keep the loop alive so the user can answer via respondToJob.
-        if (currentJob?.status === JOB_STATUS.WAITING_INPUT && !rawSummary) {
+        // In conversational mode (agent used the `question` tool at least once),
+        // don't complete until the agent produces a session summary — that's the
+        // reliable signal that it finished its actual task rather than just going
+        // idle while waiting for the user to answer a follow-up question.
+        if (hasQuestions && !rawSummary) {
+          // Re-park in WAITING_INPUT so the user can see and reply to the
+          // agent's latest message (the respond endpoint requires this status).
+          if (currentJob?.status !== JOB_STATUS.WAITING_INPUT) {
+            await db
+              .update(schema.jobs)
+              .set({ status: JOB_STATUS.WAITING_INPUT })
+              .where(eq(schema.jobs.id, jobId));
+            eventBus.emit({ type: SSE_EVENT.JOB_WAITING, data: { jobId } });
+          }
           continue;
         }
 
@@ -338,11 +354,6 @@ export async function respondToJob(
   const session = activeSessions.get(jobId);
   if (!session) throw new Error(`No active session for job ${jobId}`);
 
-  // When the user answers a structured question we keep the job in WAITING_INPUT
-  // so the idle handler can check for a session summary before deciding to
-  // complete the job (the agent may reply with another plain-text question).
-  let keepWaiting = false;
-
   if (action === "approve" || action === "deny") {
     const permission = pendingPermissions.get(jobId);
     if (!permission) throw new Error(`No pending permission for job ${jobId}`);
@@ -367,7 +378,6 @@ export async function respondToJob(
     });
 
     if (pq) {
-      keepWaiting = true;
       pendingQuestions.delete(jobId);
 
       // OpenCode's `question` tool in headless server mode has no dedicated
@@ -404,20 +414,16 @@ export async function respondToJob(
     }
   }
 
-  if (keepWaiting) {
-    // Keep WAITING_INPUT — the idle handler will check the session summary
-    // and only complete the job when the agent has finished the task.
-    eventBus.emit({ type: SSE_EVENT.JOB_WAITING, data: { jobId } });
-  } else {
-    // Resume the job as RUNNING — the event loop will re-park it if needed.
-    await db
-      .update(schema.jobs)
-      .set({ status: JOB_STATUS.RUNNING })
-      .where(eq(schema.jobs.id, jobId));
+  // Resume the job as RUNNING — the idle handler in executeJob will re-park it
+  // in WAITING_INPUT if the agent goes idle without a session summary (meaning
+  // it replied with a plain-text follow-up that the user still needs to answer).
+  await db
+    .update(schema.jobs)
+    .set({ status: JOB_STATUS.RUNNING })
+    .where(eq(schema.jobs.id, jobId));
 
-    eventBus.emit({
-      type: SSE_EVENT.JOB_STARTED,
-      data: { jobId, status: JOB_STATUS.RUNNING },
-    });
-  }
+  eventBus.emit({
+    type: SSE_EVENT.JOB_STARTED,
+    data: { jobId, status: JOB_STATUS.RUNNING },
+  });
 }
