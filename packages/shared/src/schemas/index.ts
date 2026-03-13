@@ -222,8 +222,13 @@ export const ollamaConfigSchema = z.object({
   numCtx: z.number().int().min(512).default(8192),
 });
 
+export const poolConfigSchema = z.object({
+  serverIdleTtlMinutes: z.number().int().min(1).default(15),
+});
+
 export const instanceConfigSchema = z.object({
   ollama: ollamaConfigSchema.default({}),
+  pool: poolConfigSchema.default({}),
 });
 
 export const updateInstanceConfigSchema = instanceConfigSchema.deepPartial();

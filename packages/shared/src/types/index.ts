@@ -22,6 +22,7 @@ import type {
   jobStatusSchema,
   instanceConfigSchema,
   updateInstanceConfigSchema,
+  poolConfigSchema,
   modelSchema,
   createModelSchema,
   ollamaModelSchema,
@@ -59,6 +60,7 @@ export type AutoRule = z.infer<typeof autoRuleSchema>;
 
 export type InstanceConfig = z.infer<typeof instanceConfigSchema>;
 export type UpdateInstanceConfig = z.infer<typeof updateInstanceConfigSchema>;
+export type PoolConfig = z.infer<typeof poolConfigSchema>;
 
 export type Model = z.infer<typeof modelSchema>;
 export type CreateModel = z.infer<typeof createModelSchema>;

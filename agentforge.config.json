@@ -3,5 +3,8 @@
     "enabled": true,
     "baseUrl": "http://localhost:11434",
     "numCtx": 4096
+  },
+  "pool": {
+    "serverIdleTtlMinutes": 15
   }
 }

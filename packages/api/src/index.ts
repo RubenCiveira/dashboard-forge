@@ -12,6 +12,7 @@ import { playbooksRouter } from "./routes/playbooks.js";
 import { runnersRouter } from "./routes/runners.js";
 import { ApiError } from "./lib/errors.js";
 import { startDispatcher } from "./services/job-dispatcher.js";
+import { startIdleReaper, shutdownPool } from "./services/opencode-pool.js";
 import { DEFAULT_API_PORT } from "@agentforge/shared";
 import { db, sqlite } from "./db/index.js";
 import { runners } from "./db/schema.js";
@@ -132,6 +133,17 @@ if (existingRunners.length === 0) {
 
 // Start background job dispatcher (recovers stale jobs, then polls)
 await startDispatcher();
+
+// Start OpenCode server pool idle reaper
+startIdleReaper();
+
+// Graceful shutdown: kill all managed OpenCode server processes
+const onShutdown = () => {
+  shutdownPool();
+};
+process.on("SIGTERM", onShutdown);
+process.on("SIGINT", onShutdown);
+process.on("exit", onShutdown);
 
 console.log(`🚀 AgentForge API running on http://localhost:${port}`);
 console.log(`   Health: http://localhost:${port}/api/health`);

@@ -27,6 +27,7 @@ export function writeConfig(patch: UpdateInstanceConfig): InstanceConfig {
 
   const next: InstanceConfig = {
     ollama: { ...current.ollama, ...validated.ollama },
+    pool: { ...current.pool, ...validated.pool },
   };
 
   writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2) + "\n", "utf-8");
