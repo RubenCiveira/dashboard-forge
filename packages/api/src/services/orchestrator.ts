@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { eventBus } from "../lib/events.js";
 import { acquireServer, touchServer } from "./opencode-pool.js";
+import { getOpenCodeSession } from "./opencode-session.js";
 import { JOB_STATUS, SSE_EVENT } from "@agentforge/shared";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 import type { Permission } from "@opencode-ai/sdk";
@@ -135,6 +136,10 @@ export async function executeJob(jobId: string): Promise<void> {
     if (job.contextFrom) {
       fullPrompt = `## Context from previous step\n${job.contextFrom}\n\n## Your task\n${job.prompt}`;
     }
+    // Append a completion signal instruction. The orchestrator watches for
+    // <<TASK_DONE>> in the conversation to know when the agent has finished
+    // doing real work (as opposed to just asking a follow-up question).
+    fullPrompt += "\n\n---\nIMPORTANT: When you have fully completed all requested changes (written all files, made all edits, run all commands), you MUST end your final response with exactly: <<TASK_DONE>>";
 
     // 6. Subscribe BEFORE sending the prompt — avoids a race where session.idle
     //    fires before we start listening and the job stalls in RUNNING forever.
@@ -253,20 +258,33 @@ export async function executeJob(jobId: string): Promise<void> {
           null;
 
         // In conversational mode (agent used the `question` tool at least once),
-        // don't complete until the agent produces a session summary — that's the
-        // reliable signal that it finished its actual task rather than just going
-        // idle while waiting for the user to answer a follow-up question.
+        // only complete once the agent explicitly signals it is done by including
+        // <<TASK_DONE>> in its last message. This is injected into every prompt
+        // so the agent knows to output it when all work is finished.
+        //
+        // Without this gate the orchestrator cannot distinguish "agent replied
+        // with a follow-up question" from "agent completed the task" because
+        // OpenCode fires the same session.idle event in both cases and does not
+        // always generate a session summary.
         if (hasQuestions && !rawSummary) {
-          // Re-park in WAITING_INPUT so the user can see and reply to the
-          // agent's latest message (the respond endpoint requires this status).
-          if (currentJob?.status !== JOB_STATUS.WAITING_INPUT) {
-            await db
-              .update(schema.jobs)
-              .set({ status: JOB_STATUS.WAITING_INPUT })
-              .where(eq(schema.jobs.id, jobId));
-            eventBus.emit({ type: SSE_EVENT.JOB_WAITING, data: { jobId } });
+          const conversation = getOpenCodeSession(sessionId);
+          const lastAssistantMsg = [...conversation].reverse().find((m) => m.role === "assistant");
+          const taskDone = lastAssistantMsg?.parts.some(
+            (p) => p.type === "text" && (p.text ?? "").includes("<<TASK_DONE>>"),
+          ) ?? false;
+
+          if (!taskDone) {
+            // Agent hasn't signalled completion — re-park so the user can respond.
+            if (currentJob?.status !== JOB_STATUS.WAITING_INPUT) {
+              await db
+                .update(schema.jobs)
+                .set({ status: JOB_STATUS.WAITING_INPUT })
+                .where(eq(schema.jobs.id, jobId));
+              eventBus.emit({ type: SSE_EVENT.JOB_WAITING, data: { jobId } });
+            }
+            continue;
           }
-          continue;
+          // <<TASK_DONE>> found → fall through to normal completion below.
         }
 
         const summary = rawSummary ?? "Session completed";
@@ -348,11 +366,26 @@ export async function executeJob(jobId: string): Promise<void> {
  */
 export async function respondToJob(
   jobId: string,
-  action: "approve" | "deny" | "message",
+  action: "approve" | "deny" | "message" | "complete",
   message?: string,
 ): Promise<void> {
   const session = activeSessions.get(jobId);
   if (!session) throw new Error(`No active session for job ${jobId}`);
+
+  // Explicit close: user marks the job done from the UI (fallback for tasks
+  // where the agent completes without tool calls and no summary is generated).
+  if (action === "complete") {
+    await db
+      .update(schema.jobs)
+      .set({ status: JOB_STATUS.COMPLETED, completedAt: new Date().toISOString() })
+      .where(eq(schema.jobs.id, jobId));
+    eventBus.emit({ type: SSE_EVENT.JOB_COMPLETED, data: { jobId, summary: "Completed by user" } });
+    await logJobEvent(jobId, "completed", { summary: "Completed by user" });
+    activeSessions.delete(jobId);
+    pendingPermissions.delete(jobId);
+    pendingQuestions.delete(jobId);
+    return;
+  }
 
   if (action === "approve" || action === "deny") {
     const permission = pendingPermissions.get(jobId);

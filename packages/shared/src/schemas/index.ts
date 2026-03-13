@@ -189,7 +189,7 @@ export const createJobSchema = z.object({
 });
 
 export const respondJobSchema = z.object({
-  action: z.enum(["approve", "deny", "message"]),
+  action: z.enum(["approve", "deny", "message", "complete"]),
   message: z.string().optional(),
 });
 

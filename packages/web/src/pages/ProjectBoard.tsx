@@ -231,7 +231,7 @@ export default function ProjectBoard() {
 
   async function respondJob(
     id: string,
-    action: "approve" | "deny" | "message",
+    action: "approve" | "deny" | "message" | "complete",
     message?: string,
   ) {
     setResponding(true);
@@ -468,6 +468,13 @@ export default function ProjectBoard() {
                                 {responding() ? "Sending…" : "Send Reply"}
                               </button>
                               <p class="text-xs text-gray-600 text-center">⌘↵ / Ctrl+↵ to send</p>
+                              <button
+                                disabled={responding()}
+                                onClick={() => respondJob(detail().id, "complete")}
+                                class="w-full py-1.5 bg-gray-700 hover:bg-emerald-900/60 disabled:opacity-40 rounded text-xs text-gray-400 hover:text-emerald-300 transition-colors"
+                              >
+                                Mark as done
+                              </button>
                             </div>
                           }
                         >
