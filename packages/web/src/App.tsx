@@ -9,6 +9,7 @@ const Playbooks    = lazy(() => import("./pages/Playbooks.js"));
 const Ollama       = lazy(() => import("./pages/Ollama.js"));
 const Runners      = lazy(() => import("./pages/Runners.js"));
 const ProjectBoard = lazy(() => import("./pages/ProjectBoard.js"));
+const MCPs         = lazy(() => import("./pages/MCPs.js"));
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
       <Route path="/playbooks"      component={Playbooks} />
       <Route path="/ollama"         component={Ollama} />
       <Route path="/runners"        component={Runners} />
+      <Route path="/mcps"           component={MCPs} />
       <Route path="/projects/:id"   component={ProjectBoard} />
     </Router>
   );

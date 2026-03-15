@@ -342,6 +342,8 @@ export function readAllPlaybooks(): PlaybookEntry[] {
       // Agent/skill references are stored as names; resolve to slugs (= IDs)
       const agentIds = (meta["agents"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).map(toSlug);
       const skillIds = (meta["skills"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).map(toSlug);
+      // MCP IDs are stored as UUIDs (comma-separated) — DB-backed, not slugified
+      const mcpIds   = (meta["mcps"] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
       results.push({
         id:                file.replace(/\.md$/, ""),
@@ -351,7 +353,7 @@ export function readAllPlaybooks(): PlaybookEntry[] {
         permissions,
         agentIds,
         skillIds,
-        mcpIds:            [],
+        mcpIds,
         agentsRules:       body.trim(),
         createdAt:         mtime,
         updatedAt:         mtime,
@@ -378,11 +380,21 @@ export function writePlaybookFile(playbook: PlaybookEntry): void {
   const body = [
     playbook.agentIds.length ? `agents: ${playbook.agentIds.join(", ")}` : null,
     playbook.skillIds.length ? `skills: ${playbook.skillIds.join(", ")}` : null,
+    playbook.mcpIds.length   ? `mcps: ${playbook.mcpIds.join(", ")}` : null,
     playbook.agentsRules     ? `\n${playbook.agentsRules}` : null,
   ].filter(Boolean).join("\n");
 
   const content = `${fm}\n\n${body}`.trimEnd() + "\n";
   writeFileSync(join(PLAYBOOKS_DIR, `${slug}.md`), content, "utf-8");
+}
+
+/** Update specific fields on an existing playbook file. */
+export function updatePlaybookFile(id: string, patch: Partial<Pick<PlaybookEntry, "agentIds" | "skillIds" | "mcpIds" | "agentsRules" | "description" | "permissionProfile">>): PlaybookEntry | null {
+  const current = readPlaybook(id);
+  if (!current) return null;
+  const updated: PlaybookEntry = { ...current, ...patch, updatedAt: new Date().toISOString() };
+  writePlaybookFile(updated);
+  return readPlaybook(id);
 }
 
 /** Delete a playbook's markdown file. */

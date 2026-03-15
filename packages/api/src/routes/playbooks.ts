@@ -1,9 +1,12 @@
 import { Hono } from "hono";
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
 import { NotFoundError } from "../lib/errors.js";
 import {
   readAllPlaybooks,
   readPlaybook,
   deletePlaybookFile,
+  updatePlaybookFile,
 } from "../services/markdown-sync.js";
 import { importFromZip, importFromGitHubUrl } from "../services/importer.js";
 
@@ -20,6 +23,24 @@ playbooksRouter.get("/:id", (ctx) => {
   const row = readPlaybook(id);
   if (!row) throw new NotFoundError("Playbook", id);
   return ctx.json({ data: row });
+});
+
+const patchBody = z.object({
+  agentIds:          z.array(z.string()).optional(),
+  skillIds:          z.array(z.string()).optional(),
+  mcpIds:            z.array(z.string()).optional(),
+  agentsRules:       z.string().optional(),
+  description:       z.string().optional(),
+  permissionProfile: z.enum(["autonomous", "assisted", "restrictive"]).optional(),
+});
+
+/** PATCH /api/v1/playbooks/:id */
+playbooksRouter.patch("/:id", zValidator("json", patchBody), (ctx) => {
+  const id   = ctx.req.param("id");
+  const body = ctx.req.valid("json");
+  const updated = updatePlaybookFile(id, body);
+  if (!updated) throw new NotFoundError("Playbook", id);
+  return ctx.json({ data: updated });
 });
 
 /** DELETE /api/v1/playbooks/:id */

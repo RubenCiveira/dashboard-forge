@@ -14,6 +14,7 @@ const NAV_LINKS = [
   { href: "/agents", label: "Agents" },
   { href: "/skills", label: "Skills" },
   { href: "/playbooks", label: "Playbooks" },
+  { href: "/mcps", label: "MCPs" },
   { href: "/ollama", label: "Ollama" },
   { href: "/runners", label: "Runners" },
 ];

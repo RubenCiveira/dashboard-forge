@@ -7,12 +7,14 @@ interface Playbook {
   permissionProfile: string;
   agentIds: string[];
   skillIds: string[];
+  mcpIds: string[];
   agentsRules: string;
   createdAt: string;
 }
 
 interface AgentRow { id: string; name: string }
 interface SkillRow { id: string; name: string }
+interface McpRow   { id: string; name: string; type: string; enabled: boolean }
 
 async function fetchPlaybooks(): Promise<{ data: Playbook[] }> {
   const res = await fetch("/api/v1/playbooks");
@@ -24,6 +26,10 @@ async function fetchAgents(): Promise<{ data: AgentRow[] }> {
 }
 async function fetchSkills(): Promise<{ data: SkillRow[] }> {
   const res = await fetch("/api/v1/skills?pageSize=100");
+  return res.json();
+}
+async function fetchMcps(): Promise<{ data: McpRow[] }> {
+  const res = await fetch("/api/v1/mcps");
   return res.json();
 }
 
@@ -39,14 +45,17 @@ export default function Playbooks() {
   const [playbooks, { refetch }] = createResource(fetchPlaybooks);
   const [agents]  = createResource(fetchAgents);
   const [skills]  = createResource(fetchSkills);
+  const [mcps]    = createResource(fetchMcps);
 
-  const [importing, setImporting] = createSignal(false);
-  const [status, setStatus]       = createSignal<{ ok: boolean; msg: string } | null>(null);
-  const [githubUrl, setGithubUrl] = createSignal("");
+  const [importing,  setImporting]  = createSignal(false);
+  const [status,     setStatus]     = createSignal<{ ok: boolean; msg: string } | null>(null);
+  const [githubUrl,  setGithubUrl]  = createSignal("");
   const [expandedId, setExpandedId] = createSignal<string | null>(null);
+  const [savingMcps, setSavingMcps] = createSignal<string | null>(null); // playbook id being saved
 
-  const agentMap  = () => Object.fromEntries((agents()?.data  ?? []).map((a) => [a.id, a.name]));
-  const skillMap  = () => Object.fromEntries((skills()?.data  ?? []).map((s) => [s.id, s.name]));
+  const agentMap = () => Object.fromEntries((agents()?.data ?? []).map((a) => [a.id, a.name]));
+  const skillMap = () => Object.fromEntries((skills()?.data ?? []).map((s) => [s.id, s.name]));
+  const mcpMap   = () => Object.fromEntries((mcps()?.data   ?? []).map((m) => [m.id, m]));
 
   async function handleResult(res: Response) {
     const json = await res.json() as { data?: { imported: number }; error?: { message: string } };
@@ -84,6 +93,22 @@ export default function Playbooks() {
 
   async function deletePlaybook(id: string) {
     await fetch(`/api/v1/playbooks/${id}`, { method: "DELETE" });
+    refetch();
+  }
+
+  async function toggleMcp(playbook: Playbook, mcpId: string) {
+    setSavingMcps(playbook.id);
+    const currentIds = playbook.mcpIds ?? [];
+    const newIds = currentIds.includes(mcpId)
+      ? currentIds.filter((id) => id !== mcpId)
+      : [...currentIds, mcpId];
+
+    await fetch(`/api/v1/playbooks/${playbook.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mcpIds: newIds }),
+    });
+    setSavingMcps(null);
     refetch();
   }
 
@@ -184,6 +209,7 @@ export default function Playbooks() {
             <For each={playbooks()?.data ?? []}>
               {(pb) => {
                 const expanded = () => expandedId() === pb.id;
+                const allMcps  = () => mcps()?.data ?? [];
                 return (
                   <div class="bg-gray-900 rounded-lg border border-gray-800 hover:border-gray-700 transition-colors overflow-hidden">
                     <div
@@ -200,6 +226,9 @@ export default function Playbooks() {
                           <Show when={pb.agentIds.length > 0}>
                             <span class="text-xs text-gray-500">{pb.agentIds.length} agent{pb.agentIds.length !== 1 ? "s" : ""}</span>
                           </Show>
+                          <Show when={(pb.mcpIds ?? []).length > 0}>
+                            <span class="text-xs text-purple-400">{pb.mcpIds.length} MCP{pb.mcpIds.length !== 1 ? "s" : ""}</span>
+                          </Show>
                         </div>
                         <Show when={pb.description}>
                           <p class="text-gray-400 text-sm mt-0.5">{pb.description}</p>
@@ -214,7 +243,9 @@ export default function Playbooks() {
                     </div>
 
                     <Show when={expanded()}>
-                      <div class="px-4 pb-4 pt-0 space-y-3 border-t border-gray-800">
+                      <div class="px-4 pb-4 pt-0 space-y-4 border-t border-gray-800">
+
+                        {/* Agents */}
                         <Show when={pb.agentIds.length > 0}>
                           <div>
                             <p class="text-xs text-gray-500 mb-2 mt-3">Agents</p>
@@ -229,9 +260,11 @@ export default function Playbooks() {
                             </div>
                           </div>
                         </Show>
+
+                        {/* Skills */}
                         <Show when={pb.skillIds.length > 0}>
                           <div>
-                            <p class="text-xs text-gray-500 mb-2 mt-3">Skills</p>
+                            <p class="text-xs text-gray-500 mb-2">Skills</p>
                             <div class="flex flex-wrap gap-2">
                               <For each={pb.skillIds}>
                                 {(id) => (
@@ -243,9 +276,55 @@ export default function Playbooks() {
                             </div>
                           </div>
                         </Show>
+
+                        {/* MCP association panel */}
+                        <div>
+                          <div class="flex items-center gap-2 mb-2">
+                            <p class="text-xs text-gray-500">MCP Servers</p>
+                            <Show when={savingMcps() === pb.id}>
+                              <span class="text-xs text-gray-600 animate-pulse">saving…</span>
+                            </Show>
+                          </div>
+                          <Show
+                            when={allMcps().length > 0}
+                            fallback={
+                              <p class="text-xs text-gray-600">
+                                No MCP servers configured yet.{" "}
+                                <a href="/mcps" class="text-purple-400 hover:text-purple-300 underline">Add one</a>.
+                              </p>
+                            }
+                          >
+                            <div class="flex flex-wrap gap-2">
+                              <For each={allMcps()}>
+                                {(mcp) => {
+                                  const linked = () => (pb.mcpIds ?? []).includes(mcp.id);
+                                  return (
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); toggleMcp(pb, mcp.id); }}
+                                      disabled={savingMcps() === pb.id}
+                                      class={`text-xs px-2.5 py-1 rounded border transition-colors disabled:opacity-50 ${
+                                        linked()
+                                          ? "bg-purple-900/40 text-purple-300 border-purple-800 hover:bg-purple-900/20"
+                                          : "bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300 hover:border-gray-600"
+                                      }`}
+                                      title={linked() ? `Remove ${mcp.name} from this playbook` : `Add ${mcp.name} to this playbook`}
+                                    >
+                                      {linked() ? "✓ " : "+ "}{mcp.name}
+                                      <span class={`ml-1 ${mcp.type === "local" ? "text-purple-500" : "text-blue-500"}`}>
+                                        ({mcp.type})
+                                      </span>
+                                    </button>
+                                  );
+                                }}
+                              </For>
+                            </div>
+                          </Show>
+                        </div>
+
+                        {/* Work sequence */}
                         <Show when={pb.agentsRules}>
                           <div>
-                            <p class="text-xs text-gray-500 mb-1 mt-3">Work sequence</p>
+                            <p class="text-xs text-gray-500 mb-1">Work sequence</p>
                             <pre class="text-xs text-gray-400 font-mono bg-gray-800 rounded p-3 whitespace-pre-wrap">{pb.agentsRules}</pre>
                           </div>
                         </Show>

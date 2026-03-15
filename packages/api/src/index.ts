@@ -10,6 +10,7 @@ import { jobsRouter } from "./routes/jobs.js";
 import { skillsRouter } from "./routes/skills.js";
 import { playbooksRouter } from "./routes/playbooks.js";
 import { runnersRouter } from "./routes/runners.js";
+import { mcpsRouter } from "./routes/mcps.js";
 import { ApiError } from "./lib/errors.js";
 import { startDispatcher } from "./services/job-dispatcher.js";
 import { startIdleReaper, shutdownPool } from "./services/opencode-pool.js";
@@ -38,6 +39,7 @@ app.route("/api/v1/jobs", jobsRouter);
 app.route("/api/v1/skills", skillsRouter);
 app.route("/api/v1/playbooks", playbooksRouter);
 app.route("/api/v1/runners", runnersRouter);
+app.route("/api/v1/mcps", mcpsRouter);
 
 // ─── Health check ────────────────────────────────────────────────────
 
